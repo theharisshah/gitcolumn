@@ -148,6 +148,8 @@ export type LineSelection = Record<number, number[] | 'all'>;
 export interface RepoInfo {
   path: string;
   name: string;
+  /** The shared .git directory (differs from the worktree's own git dir for linked worktrees) */
+  commonDir?: string;
 }
 
 export interface AppInfo {

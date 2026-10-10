@@ -576,6 +576,19 @@ textarea.input {
   font-weight: 600;
 }
 
+.toolbar-nav {
+  display: flex;
+  gap: 2px;
+  -webkit-app-region: no-drag;
+}
+.nav-button {
+  width: 24px;
+  height: 24px;
+}
+.nav-button:disabled {
+  opacity: 0.35;
+  background: none;
+}
 .toolbar-group {
   display: flex;
   align-items: center;

@@ -26,6 +26,12 @@ const api = createApi({
   trash: async (paths) => {
     for (const p of paths) await shell.trashItem(p);
   },
+  saveFile: async ({ title, defaultName, filters }) => {
+    const win = BrowserWindow.getFocusedWindow();
+    const opts: Electron.SaveDialogOptions = { title, defaultPath: path.join(app.getPath('downloads'), defaultName), filters };
+    const result = win ? await dialog.showSaveDialog(win, opts) : await dialog.showSaveDialog(opts);
+    return result.canceled ? null : result.filePath ?? null;
+  },
   pickDirectory: async (title) => {
     const win = BrowserWindow.getFocusedWindow();
     const opts: Electron.OpenDialogOptions = { title, properties: ['openDirectory', 'createDirectory'] };
@@ -180,7 +186,13 @@ function createWindow() {
 
 function buildMenu() {
   const isMac = process.platform === 'darwin';
+  // Command ids match the renderer's command registry (src/repo/commands.tsx).
   const send = (command: string) => () => BrowserWindow.getFocusedWindow()?.webContents.send('menu', command);
+  const item = (label: string, accelerator: string | undefined, command: string): Electron.MenuItemConstructorOptions => ({
+    label,
+    accelerator,
+    click: send(command),
+  });
   const template: Electron.MenuItemConstructorOptions[] = [
     ...(isMac
       ? [
@@ -189,7 +201,7 @@ function buildMenu() {
             submenu: [
               { role: 'about' as const },
               { type: 'separator' as const },
-              { label: 'Settings…', accelerator: 'CmdOrCtrl+,', click: send('settings') },
+              item('Settings…', 'CmdOrCtrl+,', 'view.settings'),
               { type: 'separator' as const },
               { role: 'services' as const },
               { type: 'separator' as const },
@@ -205,8 +217,10 @@ function buildMenu() {
     {
       label: 'File',
       submenu: [
-        { label: 'Open Repository…', accelerator: 'CmdOrCtrl+O', click: send('open') },
-        ...(isMac ? [] : [{ label: 'Settings…', accelerator: 'CmdOrCtrl+,', click: send('settings') }]),
+        item('Open Repository…', 'CmdOrCtrl+O', 'open'),
+        ...(isMac ? [] : [item('Settings…', 'CmdOrCtrl+,', 'view.settings')]),
+        { type: 'separator' },
+        item('Export Files…', undefined, 'files.export'),
         { type: 'separator' },
         isMac ? { role: 'close' } : { role: 'quit' },
       ],
@@ -215,7 +229,7 @@ function buildMenu() {
       label: 'Edit',
       submenu: [
         // Routed through the renderer so ⌘Z undoes git operations outside text fields.
-        { label: 'Undo', accelerator: 'CmdOrCtrl+Z', click: send('undo') },
+        item('Undo', 'CmdOrCtrl+Z', 'edit.undo'),
         { role: 'redo' },
         { type: 'separator' },
         { role: 'cut' },
@@ -227,11 +241,19 @@ function buildMenu() {
     {
       label: 'View',
       submenu: [
-        { label: 'Working Copy', accelerator: 'CmdOrCtrl+1', click: send('view-working') },
-        { label: 'History', accelerator: 'CmdOrCtrl+2', click: send('view-history') },
-        { label: 'Stashes', accelerator: 'CmdOrCtrl+3', click: send('view-stashes') },
+        item('Back', 'CmdOrCtrl+[', 'nav.back'),
+        item('Forward', 'CmdOrCtrl+]', 'nav.forward'),
         { type: 'separator' },
-        { label: 'Refresh', accelerator: 'CmdOrCtrl+R', click: send('refresh') },
+        item('Working Copy', 'CmdOrCtrl+1', 'view.working'),
+        item('History', 'CmdOrCtrl+2', 'view.history'),
+        item('Stashes', 'CmdOrCtrl+3', 'view.stashes'),
+        item('Files', 'CmdOrCtrl+4', 'view.files'),
+        item('Pull Requests', 'CmdOrCtrl+5', 'view.pulls'),
+        item('Reflog', 'CmdOrCtrl+6', 'view.reflog'),
+        item('Branches Review', 'CmdOrCtrl+7', 'view.branches'),
+        { type: 'separator' },
+        item('Quick Actions…', 'CmdOrCtrl+Shift+A', 'palette.open'),
+        item('Refresh', 'CmdOrCtrl+R', 'repo.refresh'),
         { type: 'separator' },
         { role: 'reload', accelerator: 'CmdOrCtrl+Alt+R' },
         { role: 'toggleDevTools' },
@@ -246,12 +268,14 @@ function buildMenu() {
     {
       label: 'Repository',
       submenu: [
-        { label: 'Fetch', accelerator: 'CmdOrCtrl+Shift+F', click: send('fetch') },
-        { label: 'Pull', accelerator: 'CmdOrCtrl+Shift+L', click: send('pull') },
-        { label: 'Push', accelerator: 'CmdOrCtrl+Shift+P', click: send('push') },
+        item('Fetch', 'CmdOrCtrl+Shift+F', 'repo.fetch'),
+        item('Pull', 'CmdOrCtrl+Shift+L', 'repo.pull'),
+        item('Push', 'CmdOrCtrl+Shift+P', 'repo.push'),
         { type: 'separator' },
-        { label: 'New Branch…', accelerator: 'CmdOrCtrl+Shift+B', click: send('new-branch') },
-        { label: 'Stash Changes…', accelerator: 'CmdOrCtrl+Shift+S', click: send('stash') },
+        item('New Branch…', 'CmdOrCtrl+Shift+B', 'branch.new'),
+        item('Stash Changes…', 'CmdOrCtrl+Shift+S', 'stash.save'),
+        { type: 'separator' },
+        item('Create Pull Request…', undefined, 'pr.create'),
       ],
     },
     { role: 'windowMenu' },

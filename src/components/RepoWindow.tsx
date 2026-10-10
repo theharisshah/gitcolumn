@@ -1,9 +1,16 @@
-import { useEffect, type ReactNode } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import type { RepoInfo } from '../../shared/types';
-import { useActions } from '../repo/actions';
+import { shortcutFromEvent, useCommands, type Command } from '../repo/commands';
+import type { View } from '../repo/navigation';
 import { RepoProvider, useRepo } from '../repo/RepoContext';
+import { BranchesReview } from './BranchesReview';
+import { CompareView } from './CompareView';
+import { FilesView } from './FilesView';
 import { FileView } from './FileView';
 import { History } from './History';
+import { PullRequests } from './PullRequests';
+import { QuickActions } from './QuickActions';
+import { ReflogView } from './ReflogView';
 import { SettingsView } from './SettingsView';
 import { Sidebar } from './Sidebar';
 import { Splitter, usePersistentSize } from './Splitter';
@@ -31,56 +38,52 @@ const isEditable = (el: Element | null) =>
   !!el && (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement || (el as HTMLElement).isContentEditable);
 
 function RepoLayout({ active, tabs, onRepoMenu, onClose }: Props) {
-  const { view, setView, status, error, loading, refresh, repo, undo } = useRepo();
-  const actions = useActions();
+  const { view, status, error, loading, refresh, repo, back, forward } = useRepo();
   const [sidebarWidth, setSidebarWidth] = usePersistentSize('sidebar', 240);
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const openPalette = useCallback(() => setPaletteOpen(true), []);
+  const commands = useCommands({ openPalette });
+  const commandsRef = useRef(commands);
+  commandsRef.current = commands;
 
   useEffect(() => {
     if (!active) return;
+    const runCommand = (cmd: Command | undefined) => {
+      if (!cmd || cmd.enabled === false) return false;
+      if (cmd.id === 'edit.undo' && isEditable(document.activeElement)) return false;
+      cmd.run();
+      return true;
+    };
     const onKey = (e: KeyboardEvent) => {
-      const mod = e.metaKey || e.ctrlKey;
-      // In Electron these shortcuts are menu accelerators and arrive through onMenu below.
-      if (!mod || window.gitcolumn || document.querySelector('.modal-backdrop')) return;
-      const k = e.key.toLowerCase();
-      if (!e.shiftKey && k === 'z') {
-        if (isEditable(document.activeElement)) return;
-        undo();
-      } else if (!e.shiftKey && k === '1') setView({ kind: 'working' });
-      else if (!e.shiftKey && k === '2') setView({ kind: 'history' });
-      else if (!e.shiftKey && k === '3') setView({ kind: 'stashes' });
-      else if (!e.shiftKey && k === ',') setView({ kind: 'settings' });
-      else if (!e.shiftKey && k === 'r') refresh();
-      else if (e.shiftKey && k === 'f') actions.fetch();
-      else if (e.shiftKey && k === 'l') actions.pull();
-      else if (e.shiftKey && k === 'p') actions.push();
-      else if (e.shiftKey && k === 'b') actions.createBranch();
-      else if (e.shiftKey && k === 's') actions.stashSave();
-      else return;
-      e.preventDefault();
+      if (document.querySelector('.modal-backdrop')) return;
+      const key = shortcutFromEvent(e);
+      if (!key) return;
+      const cmd = commandsRef.current.find((c) => c.shortcut === key);
+      // In Electron the app menu owns these accelerators and delivers them through onMenu.
+      if (!cmd || (window.gitcolumn && cmd.menu)) return;
+      if (runCommand(cmd)) e.preventDefault();
+    };
+    // Mouse back/forward buttons.
+    const onMouse = (e: MouseEvent) => {
+      if (e.button === 3) back();
+      else if (e.button === 4) forward();
     };
     window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [active, setView, refresh, actions, undo]);
-
-  // Commands from the native application menu (Electron only).
-  useEffect(() => {
-    if (!active || !window.gitcolumn) return;
-    return window.gitcolumn.onMenu((command) => {
-      if (command === 'undo') {
-        if (isEditable(document.activeElement)) document.execCommand('undo');
-        else if (!document.querySelector('.modal-backdrop')) undo();
-      } else if (command === 'settings') setView({ kind: 'settings' });
-      else if (command === 'fetch') actions.fetch();
-      else if (command === 'pull') actions.pull();
-      else if (command === 'push') actions.push();
-      else if (command === 'new-branch') actions.createBranch();
-      else if (command === 'stash') actions.stashSave();
-      else if (command === 'refresh') refresh();
-      else if (command === 'view-working') setView({ kind: 'working' });
-      else if (command === 'view-history') setView({ kind: 'history' });
-      else if (command === 'view-stashes') setView({ kind: 'stashes' });
+    window.addEventListener('mouseup', onMouse);
+    const offMenu = window.gitcolumn?.onMenu((id) => {
+      if (id === 'edit.undo' && isEditable(document.activeElement)) {
+        document.execCommand('undo');
+        return;
+      }
+      if (document.querySelector('.modal-backdrop') && id !== 'edit.undo') return;
+      runCommand(commandsRef.current.find((c) => c.id === id));
     });
-  }, [active, actions, undo, refresh, setView]);
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      window.removeEventListener('mouseup', onMouse);
+      offMenu?.();
+    };
+  }, [active, back, forward]);
 
   if (!active) return null;
 
@@ -104,14 +107,6 @@ function RepoLayout({ active, tabs, onRepoMenu, onClose }: Props) {
     );
   }
 
-  let main: ReactNode;
-  if (loading && !status) main = <div className="empty-state muted">Loading repository…</div>;
-  else if (view.kind === 'working') main = <WorkingCopy />;
-  else if (view.kind === 'history') main = <History refName={view.ref} label={view.label} select={view.select} />;
-  else if (view.kind === 'stashes') main = <Stashes initial={view.selected} />;
-  else if (view.kind === 'file') main = <FileView path={view.path} mode={view.mode} rev={view.rev} select={view.select} />;
-  else main = <SettingsView />;
-
   return (
     <div className="repo-window">
       <Toolbar onRepoMenu={onRepoMenu} />
@@ -123,9 +118,39 @@ function RepoLayout({ active, tabs, onRepoMenu, onClose }: Props) {
         <Splitter value={sidebarWidth} onChange={setSidebarWidth} min={180} max={420} />
         <main className="main">
           <StateBanner />
-          {main}
+          {loading && !status ? <div className="empty-state muted">Loading repository…</div> : renderView(view)}
         </main>
       </div>
+      {paletteOpen && <QuickActions commands={commands} onClose={() => setPaletteOpen(false)} />}
     </div>
   );
+}
+
+function renderView(view: View): ReactNode {
+  switch (view.kind) {
+    case 'working':
+      return <WorkingCopy />;
+    case 'history':
+      return <History refName={view.ref} label={view.label} select={view.select} search={view.search} scope={view.scope} />;
+    case 'stashes':
+      return <Stashes initial={view.selected} />;
+    case 'file':
+      return <FileView path={view.path} mode={view.mode} rev={view.rev} select={view.select} />;
+    case 'files':
+      return <FilesView rev={view.rev ?? null} label={view.label} path={view.path} />;
+    case 'reflog':
+      return <ReflogView refName={view.ref} select={view.select} />;
+    case 'branches':
+      return <BranchesReview base={view.base} />;
+    case 'pulls':
+      return <PullRequests state={view.state} number={view.number} />;
+    case 'compare':
+      return <CompareView base={view.base} head={view.head} baseLabel={view.baseLabel} headLabel={view.headLabel} />;
+    case 'settings':
+      return <SettingsView />;
+    default: {
+      const unreachable: never = view;
+      return unreachable;
+    }
+  }
 }

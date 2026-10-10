@@ -5,6 +5,8 @@ import {
   ArrowUpFromLine,
   Check,
   ChevronDown,
+  ChevronLeft,
+  ChevronRight,
   CloudDownload,
   FolderOpen,
   GitBranch,
@@ -25,7 +27,7 @@ import { useRepo } from '../repo/RepoContext';
 import { useUI } from '../ui/UIProvider';
 
 export function Toolbar({ onRepoMenu }: { onRepoMenu: (e: React.MouseEvent) => void }) {
-  const { repo, status, refs, stashes, busy, refresh, setView } = useRepo();
+  const { repo, status, refs, stashes, busy, refresh, setView, back, forward, canGoBack, canGoForward } = useRepo();
   const actions = useActions();
   const ui = useUI();
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -72,6 +74,14 @@ export function Toolbar({ onRepoMenu }: { onRepoMenu: (e: React.MouseEvent) => v
         </div>
       </div>
 
+      <div className="toolbar-nav">
+        <button className="icon-button nav-button" disabled={!canGoBack} onClick={back} title={`Back (${modKey}[)`}>
+          <ChevronLeft size={16} />
+        </button>
+        <button className="icon-button nav-button" disabled={!canGoForward} onClick={forward} title={`Forward (${modKey}])`}>
+          <ChevronRight size={16} />
+        </button>
+      </div>
       <div className="toolbar-group">
         <ToolButton icon={<CloudDownload size={18} />} label="Fetch" onClick={() => actions.fetch()} disabled={!!busy} title={`Fetch all remotes (${modKey}⇧F)`} />
         <ToolButton

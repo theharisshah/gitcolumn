@@ -1,4 +1,4 @@
-import { Archive, ChevronDown, ChevronRight, Cloud, Folder, GitBranch, History, Inbox, Package, Plus, Search, Server, Settings, Tag, X } from 'lucide-react';
+import { Archive, ChevronDown, ChevronRight, Cloud, Folder, FolderTree, GitBranch, GitPullRequest, History, Inbox, ListChecks, Package, Plus, RotateCcw, Search, Server, Settings, Tag, X } from 'lucide-react';
 import { useApp } from '../AppContext';
 import { api } from '../lib/api';
 import { useMemo, useState, type ReactNode } from 'react';
@@ -87,6 +87,7 @@ export function Sidebar() {
   const isActive = (v: View) => {
     if (v.kind !== view.kind) return false;
     if (v.kind === 'history' && view.kind === 'history') return (v.ref ?? '') === (view.ref ?? '');
+    if (v.kind === 'reflog' && view.kind === 'reflog') return (v.ref ?? '') === (view.ref ?? '');
     return true;
   };
 
@@ -207,6 +208,10 @@ export function Sidebar() {
           <SidebarItem icon={<Inbox size={14} />} label="Working Copy" active={isActive({ kind: 'working' })} badge={changes || undefined} onClick={() => setView({ kind: 'working' })} />
           <SidebarItem icon={<History size={14} />} label="History" active={isActive({ kind: 'history' })} onClick={() => setView({ kind: 'history' })} />
           <SidebarItem icon={<Archive size={14} />} label="Stashes" active={isActive({ kind: 'stashes' })} badge={stashes.length || undefined} muted onClick={() => setView({ kind: 'stashes' })} />
+          <SidebarItem icon={<FolderTree size={14} />} label="Files" active={isActive({ kind: 'files' })} onClick={() => setView({ kind: 'files' })} />
+          <SidebarItem icon={<GitPullRequest size={14} />} label="Pull Requests" active={isActive({ kind: 'pulls' })} onClick={() => setView({ kind: 'pulls' })} />
+          <SidebarItem icon={<ListChecks size={14} />} label="Branches Review" active={isActive({ kind: 'branches' })} onClick={() => setView({ kind: 'branches' })} />
+          <SidebarItem icon={<RotateCcw size={14} />} label="Reflog" active={isActive({ kind: 'reflog' })} onClick={() => setView({ kind: 'reflog' })} />
           <SidebarItem icon={<Settings size={14} />} label="Settings" active={isActive({ kind: 'settings' })} onClick={() => setView({ kind: 'settings' })} />
         </div>
 

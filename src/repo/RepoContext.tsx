@@ -3,13 +3,14 @@ import type { Ref, Remote, RepoInfo, Stash, Status, Submodule } from '../../shar
 import { api, type ConflictResult } from '../lib/api';
 import { getSetting, onSettingsChange } from '../lib/settings';
 import { useUI } from '../ui/UIProvider';
+import { navBack, navForward, navInit, navPush, navReplace, type NavState, type View } from './navigation';
 
-export type View =
-  | { kind: 'working' }
-  | { kind: 'history'; ref?: string; label?: string; select?: string }
-  | { kind: 'stashes'; selected?: string }
-  | { kind: 'file'; path: string; mode: 'history' | 'blame'; rev?: string | null; select?: string }
-  | { kind: 'settings' };
+export type { View } from './navigation';
+
+export interface ViewMemo {
+  get<T>(key: string): T | undefined;
+  set(key: string, value: unknown): void;
+}
 
 export interface UndoEntry {
   label: string;
@@ -38,7 +39,16 @@ export interface RepoCtx {
   error: string | null;
   busy: string | null;
   view: View;
-  setView(v: View): void;
+  /** Navigate to a view (adds a back-history entry unless `replace`). Stable identity. */
+  setView(v: View, opts?: { replace?: boolean }): void;
+  back(): void;
+  forward(): void;
+  canGoBack: boolean;
+  canGoForward: boolean;
+  /** Leave the current view: back if possible, otherwise to the Working Copy. */
+  closeView(): void;
+  /** Per-tab scratch memory for views (selection, expanded folders) that survives unmounting. */
+  viewMemo: ViewMemo;
   currentBranch: Ref | undefined;
   refresh(): Promise<void>;
   /** Called on every background poll, even when nothing changed (for views showing file contents) */
@@ -70,7 +80,21 @@ export function RepoProvider({ repo, active = true, children }: { repo: RepoInfo
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
-  const [view, setView] = useState<View>({ kind: 'working' });
+  const [nav, setNav] = useState<NavState>(() => navInit({ kind: 'working' }));
+  const view = nav.stack[nav.index];
+  const setView = useCallback(
+    (v: View, opts?: { replace?: boolean }) => setNav((s) => (opts?.replace ? navReplace(s, v) : navPush(s, v))),
+    [],
+  );
+  const back = useCallback(() => setNav(navBack), []);
+  const forward = useCallback(() => setNav(navForward), []);
+  const closeView = useCallback(() => setNav((s) => (s.index > 0 ? navBack(s) : navPush(s, { kind: 'working' }))), []);
+  const viewMemo = useMemo<ViewMemo>(() => {
+    const store = new Map<string, unknown>();
+    return { get: <T,>(key: string) => store.get(key) as T | undefined, set: (key, value) => void store.set(key, value) };
+  }, []);
+  const canGoBack = nav.index > 0;
+  const canGoForward = nav.index < nav.stack.length - 1;
   const [undoCount, setUndoCount] = useState(0);
   const fingerprint = useRef('');
   const busyRef = useRef(false);
@@ -226,6 +250,12 @@ export function RepoProvider({ repo, active = true, children }: { repo: RepoInfo
       busy,
       view,
       setView,
+      back,
+      forward,
+      canGoBack,
+      canGoForward,
+      closeView,
+      viewMemo,
       currentBranch,
       refresh,
       subscribeTick,
@@ -233,7 +263,32 @@ export function RepoProvider({ repo, active = true, children }: { repo: RepoInfo
       undo,
       canUndo,
     }),
-    [repo, status, refs, remotes, stashes, submodules, version, loading, error, busy, view, currentBranch, refresh, subscribeTick, run, undo, canUndo],
+    [
+      repo,
+      status,
+      refs,
+      remotes,
+      stashes,
+      submodules,
+      version,
+      loading,
+      error,
+      busy,
+      view,
+      setView,
+      back,
+      forward,
+      canGoBack,
+      canGoForward,
+      closeView,
+      viewMemo,
+      currentBranch,
+      refresh,
+      subscribeTick,
+      run,
+      undo,
+      canUndo,
+    ],
   );
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;

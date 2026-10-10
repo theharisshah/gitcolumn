@@ -1,4 +1,3 @@
-import { spawn } from 'node:child_process';
 import { existsSync, promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -52,6 +51,22 @@ import {
   RS,
 } from './parse.ts';
 import { buildPatch } from './patch.ts';
+import type { ApiCtx, HandlerModule } from './ctx.ts';
+import {
+  assertHash,
+  assertRef,
+  assertSafe,
+  assertStash,
+  expandHome,
+  insideRepo,
+  MAX_DIFF_BYTES,
+  mimeType,
+  NETWORK_TIMEOUT,
+  readText,
+  run,
+  shellQuote,
+  stripComments,
+} from './util.ts';
 
 export interface Host {
   electron: boolean;
@@ -59,13 +74,15 @@ export interface Host {
   trash?: (absPaths: string[]) => Promise<void>;
   /** Show a native folder picker. */
   pickDirectory?: (title?: string) => Promise<string | null>;
+  /** Ask where to save a file. When absent, files are saved to ~/Downloads. */
+  saveFile?: (opts: { title?: string; defaultName: string; filters?: { name: string; extensions: string[] }[] }) => Promise<string | null>;
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type Handler = (args: any) => Promise<unknown>;
 
-const NETWORK_TIMEOUT = 10 * 60_000;
-const MAX_DIFF_BYTES = 30 * 1024 * 1024;
+/** Feature modules (files, reflog, undo, branches, rebase, github) contributing handlers. */
+const HANDLER_MODULES: HandlerModule[] = [];
 
 export interface ConflictResult {
   conflicts: boolean;
@@ -179,7 +196,8 @@ export function createApi(host: Host): Record<string, Handler> {
         throw new Error(`Not a Git repository: ${dir}`);
       }
       if (!top) throw new Error(`Bare repositories are not supported: ${dir}`);
-      return { path: top, name: path.basename(top) };
+      const commonDir = (await git(top, ['rev-parse', '--path-format=absolute', '--git-common-dir']).catch(() => '')).trim();
+      return { path: top, name: path.basename(top), commonDir: commonDir || undefined };
     },
 
     async 'repo.init'({ path: p }: { path: string }): Promise<RepoInfo> {
@@ -1009,6 +1027,19 @@ export function createApi(host: Host): Record<string, Handler> {
     },
   };
 
+  const ctx: ApiCtx = {
+    host,
+    gitDir,
+    repoState,
+    getStatus,
+    withConflicts,
+    headExists,
+    configGet,
+    firstRemote,
+    call: <T,>(method: string, args: object) => api[method](args) as Promise<T>,
+  };
+  for (const mod of HANDLER_MODULES) Object.assign(api, mod(ctx));
+
   async function firstRemote(repo: string): Promise<string | undefined> {
     const remotes = parseRemotes(await git(repo, ['remote', '-v']));
     return remotes.find((r) => r.name === 'origin')?.name ?? remotes[0]?.name;
@@ -1030,79 +1061,4 @@ export async function dispatch(api: Record<string, Handler>, method: string, arg
     }
   }
   return handler(a);
-}
-
-function assertSafe(value: string) {
-  if (typeof value !== 'string' || !value || value.startsWith('-') || value.includes('\0')) {
-    throw new Error(`Invalid name: ${value}`);
-  }
-}
-
-function assertHash(value: string) {
-  if (!/^[0-9a-f]{7,64}$/.test(value)) throw new Error(`Invalid object id: ${value}`);
-}
-
-function assertRef(ref: string) {
-  if (!/^refs\/(heads|tags)\/[^\0]+$/.test(ref) || ref.includes('..')) throw new Error(`Invalid ref: ${ref}`);
-}
-
-function shellQuote(s: string): string {
-  return `'${s.replace(/'/g, `'\\''`)}'`;
-}
-
-const MIME: Record<string, string> = {
-  png: 'image/png',
-  jpg: 'image/jpeg',
-  jpeg: 'image/jpeg',
-  gif: 'image/gif',
-  webp: 'image/webp',
-  avif: 'image/avif',
-  bmp: 'image/bmp',
-  ico: 'image/x-icon',
-  svg: 'image/svg+xml',
-};
-
-function mimeType(p: string): string {
-  return MIME[p.split('.').pop()?.toLowerCase() ?? ''] ?? 'application/octet-stream';
-}
-
-function assertStash(ref: string) {
-  if (!/^stash@\{\d+\}$/.test(ref)) throw new Error(`Invalid stash: ${ref}`);
-}
-
-function insideRepo(repo: string, rel: string): string {
-  const abs = path.resolve(repo, rel);
-  if (abs !== repo && !abs.startsWith(repo + path.sep)) throw new Error(`Path is outside the repository: ${rel}`);
-  return abs;
-}
-
-function expandHome(p: string): string {
-  const trimmed = p.trim();
-  if (trimmed === '~') return os.homedir();
-  if (trimmed.startsWith('~/')) return path.join(os.homedir(), trimmed.slice(2));
-  return path.resolve(trimmed);
-}
-
-async function readText(file: string): Promise<string | undefined> {
-  try {
-    return await fs.readFile(file, 'utf8');
-  } catch {
-    return undefined;
-  }
-}
-
-function stripComments(msg: string): string {
-  return msg
-    .split('\n')
-    .filter((l) => !l.startsWith('#'))
-    .join('\n')
-    .trim();
-}
-
-function run(cmd: string, args: string[]): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(cmd, args, { stdio: 'ignore', detached: true });
-    child.on('error', reject);
-    child.on('close', (code) => (code === 0 ? resolve() : reject(new Error(`${cmd} exited with code ${code}`))));
-  });
 }

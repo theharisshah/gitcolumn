@@ -41,6 +41,11 @@ export function configureGit(env: NodeJS.ProcessEnv) {
   Object.assign(ENV, env);
 }
 
+/** The environment git runs with (including askpass settings), for other tools such as gh. */
+export function gitEnv(): NodeJS.ProcessEnv {
+  return { ...ENV };
+}
+
 const BASE_ARGS = ['-c', 'core.quotepath=false', '-c', 'color.ui=false', '-c', 'core.pager=cat'];
 
 /**

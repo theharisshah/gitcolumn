@@ -3,7 +3,7 @@ import { useEffect, useState, type ReactNode } from 'react';
 import type { LfsFile, LfsStatus } from '../../shared/types';
 import { useApp } from '../AppContext';
 import { api } from '../lib/api';
-import { getSetting, setSetting, type Settings } from '../lib/settings';
+import { useSetting } from '../lib/settings';
 import { useActions } from '../repo/actions';
 import { useRepo } from '../repo/RepoContext';
 import { useUI } from '../ui/UIProvider';
@@ -22,14 +22,14 @@ function Section({ title, icon, children, description }: { title: string; icon?:
 }
 
 export function SettingsView() {
-  const { repo, setView } = useRepo();
+  const { repo, closeView } = useRepo();
   return (
     <div className="settings-view">
       <div className="pane-header">
         <SettingsIcon size={14} className="muted" />
         <span className="pane-title">Settings — {repo.name}</span>
         <span className="spacer" />
-        <button className="icon-button" title="Close" onClick={() => setView({ kind: 'working' })}>
+        <button className="icon-button" title="Close" onClick={closeView}>
           <X size={14} />
         </button>
       </div>
@@ -137,28 +137,26 @@ function RemotesSection() {
 }
 
 function BehaviorSection() {
-  const [s, setS] = useState<Settings>(() => ({
-    pullRebase: getSetting('pullRebase'),
-    autoFetchMinutes: getSetting('autoFetchMinutes'),
-    syntaxHighlighting: getSetting('syntaxHighlighting'),
-  }));
-  const set = <K extends keyof Settings>(k: K, v: Settings[K]) => {
-    setSetting(k, v);
-    setS((prev) => ({ ...prev, [k]: v }));
-  };
+  const [pullRebase, setPullRebase] = useSetting('pullRebase');
+  const [autoFetch, setAutoFetch] = useSetting('autoFetchMinutes');
+  const [syntax, setSyntax] = useSetting('syntaxHighlighting');
+  const [rowStyle, setRowStyle] = useSetting('historyRowStyle');
+  const [monthHeaders, setMonthHeaders] = useSetting('historyMonthHeaders');
+  const [avatars, setAvatars] = useSetting('githubAvatars');
+  const [staleDays, setStaleDays] = useSetting('staleBranchDays');
   return (
     <Section title="Behavior" description="These preferences apply to all repositories.">
       <div className="settings-grid">
         <label className="field">
           <span className="field-label">When pulling</span>
-          <select className="input" value={s.pullRebase ? 'rebase' : 'merge'} onChange={(e) => set('pullRebase', e.target.value === 'rebase')}>
+          <select className="input" value={pullRebase ? 'rebase' : 'merge'} onChange={(e) => setPullRebase(e.target.value === 'rebase')}>
             <option value="merge">Merge remote changes</option>
             <option value="rebase">Rebase onto remote changes</option>
           </select>
         </label>
         <label className="field">
           <span className="field-label">Fetch automatically</span>
-          <select className="input" value={s.autoFetchMinutes} onChange={(e) => set('autoFetchMinutes', Number(e.target.value))}>
+          <select className="input" value={autoFetch} onChange={(e) => setAutoFetch(Number(e.target.value))}>
             <option value={0}>Never</option>
             <option value={5}>Every 5 minutes</option>
             <option value={10}>Every 10 minutes</option>
@@ -166,10 +164,36 @@ function BehaviorSection() {
             <option value={30}>Every 30 minutes</option>
           </select>
         </label>
+        <label className="field">
+          <span className="field-label">History rows</span>
+          <select className="input" value={rowStyle} onChange={(e) => setRowStyle(e.target.value as typeof rowStyle)}>
+            <option value="auto">Automatic (compact when narrow)</option>
+            <option value="columns">Columns</option>
+            <option value="compact">Compact (two lines)</option>
+          </select>
+        </label>
+        <label className="field">
+          <span className="field-label">Stale branches after</span>
+          <select className="input" value={staleDays} onChange={(e) => setStaleDays(Number(e.target.value))}>
+            <option value={30}>30 days</option>
+            <option value={60}>60 days</option>
+            <option value={90}>90 days</option>
+            <option value={180}>180 days</option>
+            <option value={365}>1 year</option>
+          </select>
+        </label>
       </div>
       <label className="toggle settings-row">
-        <input type="checkbox" checked={s.syntaxHighlighting} onChange={(e) => set('syntaxHighlighting', e.target.checked)} />
+        <input type="checkbox" checked={syntax} onChange={(e) => setSyntax(e.target.checked)} />
         Syntax highlighting in diffs and blame
+      </label>
+      <label className="toggle settings-row">
+        <input type="checkbox" checked={monthHeaders} onChange={(e) => setMonthHeaders(e.target.checked)} />
+        Group history by month
+      </label>
+      <label className="toggle settings-row">
+        <input type="checkbox" checked={avatars} onChange={(e) => setAvatars(e.target.checked)} />
+        Show GitHub avatars (looked up through the GitHub CLI when this repository is on GitHub)
       </label>
     </Section>
   );

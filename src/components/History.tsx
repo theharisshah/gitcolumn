@@ -37,14 +37,26 @@ function graphGeometry(maxLanes: number, listWidth: number): GraphGeometry {
 const PAGE = 500;
 const NO_GRAPH = { rows: [] as GraphRow[], maxWidth: 0 };
 
-export function History({ refName, label, select }: { refName?: string; label?: string; select?: string }) {
+export function History({
+  refName,
+  label,
+  select,
+  search: searchProp,
+  scope,
+}: {
+  refName?: string;
+  label?: string;
+  select?: string;
+  search?: string;
+  scope?: 'all';
+}) {
   const { repo, refs, status, setView } = useRepo();
   const ui = useUI();
   const actions = useActions();
   const [detailsWidth, setDetailsWidth] = usePersistentSize('history.details', 560);
   const [all, setAll] = useState(() => localStorage.getItem('gitcolumn.historyAll') === '1');
-  const [searchInput, setSearchInput] = useState('');
-  const [search, setSearch] = useState('');
+  const [searchInput, setSearchInput] = useState(searchProp ?? '');
+  const [search, setSearch] = useState(searchProp?.trim() ?? '');
   const [searchMode, setSearchMode] = useState<SearchMode>('message');
   const [commits, setCommits] = useState<Commit[]>([]);
   // Laid out when each page arrives, so the graph always matches the commits it was built from.
@@ -58,7 +70,12 @@ export function History({ refName, label, select }: { refName?: string; label?: 
   const loadingMore = useRef(false);
   const requestId = useRef(0);
 
-  const showAll = all && !refName;
+  const showAll = (all || scope === 'all') && !refName;
+
+  // Searches started elsewhere (toolbar search field, Quick Actions) arrive as a prop.
+  useEffect(() => {
+    if (searchProp !== undefined) setSearchInput(searchProp);
+  }, [searchProp]);
 
   // Reload when refs move (commit, fetch, checkout...), not on every working copy change.
   const refsKey = useMemo(() => JSON.stringify([status?.head, refs.map((r) => r.ref + r.hash)]), [status?.head, refs]);

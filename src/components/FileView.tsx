@@ -12,7 +12,7 @@ import { Splitter, usePersistentSize } from './Splitter';
 import { StatusBadge } from './StatusBadge';
 
 export function FileView({ path, mode, rev, select }: { path: string; mode: 'history' | 'blame'; rev?: string | null; select?: string }) {
-  const { setView } = useRepo();
+  const { setView, closeView } = useRepo();
   return (
     <div className="file-view">
       <div className="pane-header">
@@ -29,7 +29,7 @@ export function FileView({ path, mode, rev, select }: { path: string; mode: 'his
           </button>
         </div>
         <span className="spacer" />
-        <button className="icon-button" title="Close" onClick={() => setView({ kind: 'working' })}>
+        <button className="icon-button" title="Close" onClick={closeView}>
           <X size={14} />
         </button>
       </div>
