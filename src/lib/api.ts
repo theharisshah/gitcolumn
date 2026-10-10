@@ -16,6 +16,7 @@ import type {
   LineSelection,
   PatchAction,
   RebasePlan,
+  ReflogEntry,
   RebaseStep,
   Ref,
   Remote,
@@ -97,6 +98,8 @@ export const api = {
   exportArchive: (repo: string, rev: string, name: string, path?: string) => call<string | null>('archive.export', { repo, rev, name, path }),
   revealExport: (path: string) => call('archive.reveal', { path }),
   diffFiles: (repo: string, from: string | null, to: string) => call<ChangedFile[]>('diff.files', { repo, from, to }),
+  reflog: (repo: string, ref = 'HEAD', skip = 0, limit = 200) =>
+    call<{ entries: ReflogEntry[]; hasMore: boolean }>('reflog.list', { repo, ref, skip, limit }),
   blame: (repo: string, path: string, rev?: string | null) => call<Blame>('blame', { repo, path, rev }),
   blob: (repo: string, spec: BlobSpec) => call<Blob | null>('file.blob', { repo, ...spec }),
   writeGitignore: (repo: string, content: string) => call('gitignore.write', { repo, content }),

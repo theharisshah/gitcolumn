@@ -664,7 +664,7 @@ export function useActions() {
         });
       },
 
-      async reset(c: Commit) {
+      async reset(c: Pick<Commit, 'hash' | 'subject'>) {
         const v = await ui.form({
           title: `Reset "${headName}" to ${shortHash(c.hash)}`,
           message: <>“{c.subject}”</>,

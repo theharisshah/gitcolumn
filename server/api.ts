@@ -50,6 +50,7 @@ import {
 import { buildPatch } from './patch.ts';
 import { changedFiles } from './changes.ts';
 import { filesApi } from './files.ts';
+import { reflogApi } from './reflog.ts';
 import type { ApiCtx, HandlerModule } from './ctx.ts';
 import {
   assertHash,
@@ -81,7 +82,7 @@ export interface Host {
 export type Handler = (args: any) => Promise<unknown>;
 
 /** Feature modules (files, reflog, undo, branches, rebase, github) contributing handlers. */
-const HANDLER_MODULES: HandlerModule[] = [filesApi];
+const HANDLER_MODULES: HandlerModule[] = [filesApi, reflogApi];
 
 export interface ConflictResult {
   conflicts: boolean;

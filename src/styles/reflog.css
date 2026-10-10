@@ -1,0 +1,120 @@
+/* Reflog view */
+.reflog-view {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+.reflog-list-pane {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--bg-pane);
+}
+.reflog-ref {
+  width: auto;
+  height: 24px;
+  padding: 0 6px;
+  font-size: 12px;
+}
+.reflog-hint {
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.reflog-scroll {
+  flex: 1;
+  overflow: auto;
+  outline: none;
+}
+.reflog-row {
+  position: absolute;
+  left: 0;
+  right: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 3px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--border);
+  cursor: default;
+}
+.reflog-row:hover {
+  background: var(--bg-hover);
+}
+.reflog-row.selected {
+  background: var(--selected);
+}
+.reflog-scroll:focus .reflog-row.selected {
+  background: var(--accent);
+  color: #fff;
+}
+.reflog-scroll:focus .reflog-row.selected .muted,
+.reflog-scroll:focus .reflog-row.selected .reflog-action {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.2);
+}
+.reflog-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  white-space: nowrap;
+}
+.reflog-detail,
+.reflog-subject {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.reflog-time {
+  flex: none;
+}
+.reflog-action {
+  flex: none;
+  font-size: 10.5px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 8px;
+  background: var(--bg-hover);
+  color: var(--text-muted);
+}
+.reflog-action.action-commit {
+  background: rgba(45, 164, 78, 0.14);
+  color: var(--success);
+}
+.reflog-action.action-amend,
+.reflog-action.action-pick {
+  background: rgba(130, 80, 223, 0.14);
+  color: var(--lane-4);
+}
+.reflog-action.action-checkout {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.reflog-action.action-reset {
+  background: rgba(217, 63, 63, 0.13);
+  color: var(--danger);
+}
+.reflog-action.action-rebase,
+.reflog-action.action-merge,
+.reflog-action.action-pull {
+  background: rgba(212, 134, 11, 0.15);
+  color: var(--lane-3);
+}
+.reflog-detail-pane {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.reflog-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-header);
+  font-size: 12.5px;
+  flex: none;
+}

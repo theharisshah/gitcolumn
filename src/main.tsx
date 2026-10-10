@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client';
 import { App } from './App';
 import './styles.css';
 import './styles/files.css';
+import './styles/reflog.css';
 
 if (window.gitcolumn) document.documentElement.classList.add('electron', `platform-${window.gitcolumn.platform}`);
 

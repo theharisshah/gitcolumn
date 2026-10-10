@@ -304,3 +304,24 @@ export interface FileContentResult {
   oid?: string;
   submodule?: { commit: string; url?: string };
 }
+
+// ------------------------------------------------------------------ reflog
+
+export interface ReflogEntry {
+  /** Position in the reflog (0 = most recent) */
+  index: number;
+  /** e.g. HEAD@{3}, main@{0} */
+  selector: string;
+  hash: string;
+  parents: string[];
+  /** Where the ref pointed before this entry (the next older entry), if known */
+  previous?: string;
+  /** e.g. "commit", "commit (amend)", "checkout", "rebase (finish)", "reset" */
+  action: string;
+  detail: string;
+  /** When the ref moved (unix seconds) */
+  time: number;
+  identity: { name: string; email: string };
+  authorDate: number;
+  subject: string;
+}
