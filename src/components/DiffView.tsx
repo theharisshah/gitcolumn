@@ -250,21 +250,33 @@ export const FileDiffSection = memo(function FileDiffSection({
   diff,
   id,
   defaultOpen = true,
+  open: openProp,
+  onToggle,
   images,
   onContextMenu,
 }: {
   diff: FileDiff;
   id?: string;
   defaultOpen?: boolean;
+  /** Controlled open state (with onToggle) */
+  open?: boolean;
+  onToggle?: (open: boolean) => void;
   images?: ImageSources;
   onContextMenu?: (e: React.MouseEvent) => void;
 }) {
-  const [open, setOpen] = useState(defaultOpen);
+  const [openState, setOpenState] = useState(defaultOpen);
+  const open = openProp ?? openState;
+  const toggle = () => {
+    if (onToggle) onToggle(!open);
+    else setOpenState(!open);
+  };
+  const status = diffStatus(diff);
   return (
     <section className="file-diff" id={id}>
-      <header className="file-diff-header" onClick={() => setOpen(!open)} onContextMenu={onContextMenu}>
+      <header className="file-diff-header" onClick={toggle} onContextMenu={onContextMenu}>
         {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-        <StatusBadge status={diffStatus(diff)} />
+        <span className={`file-diff-kind kind-${status}`}>{STATUS_WORD[status]}</span>
+        <StatusBadge status={status} />
         <span className="file-diff-path">
           {diff.isRename && diff.oldPath !== diff.newPath ? (
             <>
@@ -281,6 +293,8 @@ export const FileDiffSection = memo(function FileDiffSection({
     </section>
   );
 });
+
+const STATUS_WORD: Partial<Record<StatusCode, string>> = { A: 'added', D: 'deleted', R: 'renamed', M: 'modified' };
 
 export function DiffStat({ additions, deletions }: { additions?: number; deletions?: number }) {
   if (additions === undefined && deletions === undefined) return null;

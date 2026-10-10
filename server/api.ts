@@ -6,7 +6,6 @@ import type {
   Blame,
   Blob,
   BlobSpec,
-  ChangedFile,
   Commit,
   CommitDetail,
   FileCommit,
@@ -40,8 +39,6 @@ import {
   parseLfsFiles,
   parseLfsPatterns,
   parseLog,
-  parseNameStatus,
-  parseNumstat,
   parseRefs,
   parseRemotes,
   parseStashes,
@@ -51,6 +48,8 @@ import {
   RS,
 } from './parse.ts';
 import { buildPatch } from './patch.ts';
+import { changedFiles } from './changes.ts';
+import { filesApi } from './files.ts';
 import type { ApiCtx, HandlerModule } from './ctx.ts';
 import {
   assertHash,
@@ -82,7 +81,7 @@ export interface Host {
 export type Handler = (args: any) => Promise<unknown>;
 
 /** Feature modules (files, reflog, undo, branches, rebase, github) contributing handlers. */
-const HANDLER_MODULES: HandlerModule[] = [];
+const HANDLER_MODULES: HandlerModule[] = [filesApi];
 
 export interface ConflictResult {
   conflicts: boolean;
@@ -273,25 +272,17 @@ export function createApi(host: Host): Record<string, Handler> {
       const raw = await git(repo, [
         'show',
         '-s',
-        `--format=${['%H', '%P', '%an', '%ae', '%at', '%cn', '%ce', '%ct', '%B'].join('%x1f')}`,
+        `--format=${['%H', '%P', '%an', '%ae', '%at', '%cn', '%ce', '%ct', '%T', '%B'].join('%x1f')}`,
         hash,
       ]);
-      const [h, parents, author, email, date, committer, committerEmail, committerDate, ...msg] = raw.split(FS);
+      const [h, parents, author, email, date, committer, committerEmail, committerDate, tree, ...msg] = raw.split(FS);
       const message = msg.join(FS).replace(/\s+$/, '');
       const nl = message.indexOf('\n');
       const parentList = parents ? parents.split(' ') : [];
-      const range = parentList.length ? [parentList[0], h] : null;
-      const nameArgs = range
-        ? ['diff', '-z', '--name-status', '-M', ...range]
-        : ['diff-tree', '-r', '-z', '--root', '--no-commit-id', '--name-status', '-M', h];
-      const numArgs = range
-        ? ['diff', '-z', '--numstat', '-M', ...range]
-        : ['diff-tree', '-r', '-z', '--root', '--no-commit-id', '--numstat', '-M', h];
-      const [names, nums] = await Promise.all([git(repo, nameArgs), git(repo, numArgs)]);
-      const stats = parseNumstat(nums);
-      const files: ChangedFile[] = parseNameStatus(names).map((f) => ({ ...f, ...stats.get(f.path) }));
+      const files = await changedFiles(repo, parentList[0] ?? null, h);
       return {
         hash: h,
+        tree,
         parents: parentList,
         author,
         email,
@@ -727,8 +718,21 @@ export function createApi(host: Host): Record<string, Handler> {
     },
 
     // -------------------------------------------------------- file history
-    async 'file.history'({ repo, path: p, skip = 0, limit = 300 }: { repo: string; path: string; skip?: number; limit?: number }): Promise<FileCommit[]> {
-      if (!(await headExists(repo))) return [];
+    async 'file.history'({
+      repo,
+      path: p,
+      rev,
+      skip = 0,
+      limit = 300,
+    }: {
+      repo: string;
+      path: string;
+      rev?: string | null;
+      skip?: number;
+      limit?: number;
+    }): Promise<FileCommit[]> {
+      if (rev) assertSafe(rev);
+      else if (!(await headExists(repo))) return [];
       const raw = await git(repo, [
         'log',
         '--follow',
@@ -737,7 +741,7 @@ export function createApi(host: Host): Record<string, Handler> {
         `--format=${FILE_LOG_FORMAT}`,
         `--skip=${skip}`,
         `--max-count=${limit}`,
-        'HEAD',
+        rev || 'HEAD',
         '--',
         p,
       ]);

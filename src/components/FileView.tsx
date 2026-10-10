@@ -3,11 +3,10 @@ import { useEffect, useMemo, useState } from 'react';
 import type { Blame, BlameCommit, FileCommit, FileDiff } from '../../shared/types';
 import { api } from '../lib/api';
 import { copyText, fullDate, hashColor, relativeTime, shortHash } from '../lib/format';
-import { highlightLines, languageFor } from '../lib/highlight';
-import { getSetting } from '../lib/settings';
 import { useRepo } from '../repo/RepoContext';
 import { useUI } from '../ui/UIProvider';
-import { CodeText, DiffView } from './DiffView';
+import { CodeLines } from './CodeLines';
+import { DiffView } from './DiffView';
 import { Splitter, usePersistentSize } from './Splitter';
 import { StatusBadge } from './StatusBadge';
 
@@ -33,14 +32,14 @@ export function FileView({ path, mode, rev, select }: { path: string; mode: 'his
           <X size={14} />
         </button>
       </div>
-      {mode === 'history' ? <FileHistory key={path} path={path} select={select} /> : <BlameView key={`${path}@${rev ?? ''}`} path={path} rev={rev ?? null} />}
+      {mode === 'history' ? <FileHistory key={`${path}@${rev ?? ''}`} path={path} rev={rev ?? null} select={select} /> : <BlameView key={`${path}@${rev ?? ''}`} path={path} rev={rev ?? null} />}
     </div>
   );
 }
 
 // ------------------------------------------------------------------ history
 
-function FileHistory({ path, select }: { path: string; select?: string }) {
+function FileHistory({ path, rev, select }: { path: string; rev: string | null; select?: string }) {
   const { repo, version, setView } = useRepo();
   const [listWidth, setListWidth] = usePersistentSize('file.history', 380);
   const [commits, setCommits] = useState<FileCommit[] | null>(null);
@@ -50,13 +49,13 @@ function FileHistory({ path, select }: { path: string; select?: string }) {
 
   useEffect(() => {
     api
-      .fileHistory(repo.path, path)
+      .fileHistory(repo.path, path, 0, rev)
       .then((list) => {
         setCommits(list);
         setSelected((s) => (s && list.some((c) => c.hash === s) ? s : list[0]?.hash ?? null));
       })
       .catch((e) => setError(e instanceof Error ? e.message : String(e)));
-  }, [repo.path, path, version]);
+  }, [repo.path, path, rev, version]);
 
   const current = commits?.find((c) => c.hash === selected);
 
@@ -160,10 +159,7 @@ function BlameView({ path, rev }: { path: string; rev: string | null }) {
   }, [repo.path, path, rev, rev ? 0 : version]);
 
   const lines = useMemo(() => blame?.lines.slice(0, MAX_BLAME_LINES) ?? [], [blame]);
-  const syntax = useMemo(() => {
-    const lang = getSetting('syntaxHighlighting') ? languageFor(path) : null;
-    return lang && lines.length ? highlightLines(lines.map((l) => l.content), lang) : null;
-  }, [lines, path]);
+  const contents = useMemo(() => lines.map((l) => l.content), [lines]);
   const [minTime, maxTime] = useMemo(() => {
     const times = Object.values(blame?.commits ?? {})
       .filter((c) => !c.uncommitted)
@@ -209,18 +205,27 @@ function BlameView({ path, rev }: { path: string; rev: string | null }) {
         {Object.keys(blame.commits).length} commits · {blame.lines.length.toLocaleString()} lines
       </div>
       <div className="diff-scroll">
-        <div className="diff blame-lines">
-          {lines.map((line, i) => {
-            const c = blame.commits[line.hash];
-            const first = i === 0 || lines[i - 1].hash !== line.hash;
-            return (
-              <div
-                key={i}
-                className={`blame-line ${first ? 'blame-first' : ''} ${active === line.hash ? 'active' : ''}`}
-                onClick={() => setActive(line.hash === active ? null : line.hash)}
-                onContextMenu={(e) => menu(e, c)}
-              >
-                <span className="blame-info" style={{ '--age': age(c) } as React.CSSProperties} title={c.uncommitted ? 'Not committed yet' : `${c.summary}\n${c.author} · ${fullDate(c.time)}\n${c.hash}`}>
+        <div className="blame-lines">
+          <CodeLines
+            text={contents}
+            path={path}
+            max={MAX_BLAME_LINES}
+            rowClass={(i) => {
+              const first = i === 0 || lines[i - 1].hash !== lines[i].hash;
+              return `blame-line ${first ? 'blame-first' : ''} ${active === lines[i].hash ? 'active' : ''}`;
+            }}
+            onRowClick={(i) => setActive(lines[i].hash === active ? null : lines[i].hash)}
+            onRowContextMenu={(e, i) => menu(e, blame.commits[lines[i].hash])}
+            gutter={(i) => {
+              const line = lines[i];
+              const c = blame.commits[line.hash];
+              const first = i === 0 || lines[i - 1].hash !== line.hash;
+              return (
+                <span
+                  className="blame-info"
+                  style={{ '--age': age(c) } as React.CSSProperties}
+                  title={c.uncommitted ? 'Not committed yet' : `${c.summary}\n${c.author} · ${fullDate(c.time)}\n${c.hash}`}
+                >
                   {first &&
                     (c.uncommitted ? (
                       <span className="blame-uncommitted">Not committed yet</span>
@@ -234,15 +239,10 @@ function BlameView({ path, rev }: { path: string; rev: string | null }) {
                       </>
                     ))}
                 </span>
-                <span className="ln">{line.line}</span>
-                <span className="diff-content">
-                  <CodeText text={line.content} segments={syntax?.[i]} />
-                </span>
-              </div>
-            );
-          })}
+              );
+            }}
+          />
         </div>
-        {blame.lines.length > MAX_BLAME_LINES && <div className="diff-note">Showing the first {MAX_BLAME_LINES.toLocaleString()} lines.</div>}
       </div>
     </div>
   );

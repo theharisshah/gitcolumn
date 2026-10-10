@@ -1,0 +1,291 @@
+/* Files view, file tree, file content, revision picker, commit details redesign */
+
+.files-view,
+.files-browser,
+.file-content {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+  min-width: 0;
+}
+.files-view,
+.file-content {
+  flex-direction: column;
+}
+.files-browser.compact {
+  flex-direction: column;
+}
+.files-tree-pane {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  background: var(--bg-pane);
+}
+.files-browser.compact .files-tree-pane {
+  border-bottom: none;
+}
+.files-content-pane {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.files-filter {
+  margin: 6px 8px;
+  height: 24px;
+  flex: none;
+}
+.file-tree {
+  flex: 1;
+  overflow: auto;
+  outline: none;
+  position: relative;
+}
+.tree-note {
+  padding: 12px;
+  font-size: 12px;
+}
+.tree-row {
+  position: absolute;
+  left: 0;
+  right: 0;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding-right: 8px;
+  white-space: nowrap;
+  font-size: 12.5px;
+  cursor: default;
+}
+.tree-row.flat {
+  position: static;
+  height: 24px;
+  padding-left: 10px;
+}
+.tree-row:hover {
+  background: var(--bg-hover);
+}
+.tree-row.selected {
+  background: var(--selected);
+}
+.file-tree:focus .tree-row.selected {
+  background: var(--accent);
+  color: #fff;
+}
+.file-tree:focus .tree-row.selected .file-icon,
+.file-tree:focus .tree-row.selected .tree-status {
+  color: #fff;
+}
+.tree-chevron {
+  width: 12px;
+  display: flex;
+  flex: none;
+  color: var(--text-muted);
+}
+.tree-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tree-name mark {
+  background: none;
+  color: var(--accent);
+  font-weight: 700;
+}
+.tree-status {
+  font-size: 10.5px;
+  font-weight: 700;
+  font-family: var(--mono);
+}
+.tree-status-modified .tree-status,
+.tree-status-modified .tree-name {
+  color: var(--warning);
+}
+.tree-status-added .tree-status,
+.tree-status-added .tree-name {
+  color: var(--success);
+}
+.tree-status-deleted .tree-status,
+.tree-status-deleted .tree-name {
+  color: var(--danger);
+}
+.tree-status-renamed .tree-status {
+  color: var(--accent);
+}
+.tree-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--warning);
+  flex: none;
+}
+.file-icon {
+  flex: none;
+  color: var(--text-muted);
+}
+.file-icon-tree {
+  color: var(--accent);
+}
+.file-icon-commit {
+  color: var(--lane-4);
+}
+
+.file-content-header {
+  gap: 6px;
+}
+.file-content-name {
+  font-weight: 600;
+  font-size: 12.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  user-select: text;
+}
+.code-line {
+  display: flex;
+  min-height: 18px;
+}
+.code-line .ln {
+  flex: none;
+  color: var(--text-faint);
+  background: var(--gutter-bg);
+  user-select: none;
+}
+.code-line .diff-content {
+  padding-left: 10px;
+}
+.submodule-note {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: flex-start;
+}
+
+/* Revision picker */
+.picker-anchor {
+  position: relative;
+  display: inline-flex;
+  min-width: 0;
+}
+.picker-popover {
+  top: calc(100% + 4px);
+  left: 0;
+}
+.rev-picker {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 24px;
+  padding: 0 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border-strong);
+  background: var(--bg-button);
+  font-size: 12px;
+  max-width: 340px;
+  min-width: 0;
+}
+.rev-picker-label {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Commit details */
+.commit-details-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 36px;
+  padding: 0 12px 0 18px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-header);
+  flex: none;
+  position: sticky;
+  top: 0;
+  z-index: 4;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.commit-details.tree-mode {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.commit-details.tree-mode .commit-meta {
+  flex: none;
+  max-height: 40%;
+  overflow: auto;
+}
+.commit-tree {
+  flex: 1;
+  min-height: 260px;
+  display: flex;
+  border-top: 1px solid var(--border);
+}
+.commit-meta-top {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+}
+.commit-meta-table {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 3px 12px;
+  margin: 0;
+  font-size: 12px;
+}
+.commit-meta-table dt {
+  color: var(--text-muted);
+  text-align: right;
+}
+.commit-meta-table dd {
+  margin: 0;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  overflow-wrap: anywhere;
+}
+.commit-meta-table .mono {
+  font-size: 11.5px;
+}
+.commit-parents {
+  display: inline-flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+.commit-avatar {
+  flex: none;
+}
+.avatar-img {
+  object-fit: cover;
+  background: var(--bg-hover);
+}
+.changeset-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 18px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+}
+.file-diff-kind {
+  font-size: 11.5px;
+  color: var(--accent);
+  min-width: 52px;
+}
+.file-diff-kind.kind-A {
+  color: var(--success);
+}
+.file-diff-kind.kind-D {
+  color: var(--danger);
+}

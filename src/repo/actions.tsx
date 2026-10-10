@@ -830,7 +830,14 @@ export function useActions() {
         return true;
       },
 
-      showFileHistory: (filePath: string) => setView({ kind: 'file', path: filePath, mode: 'history' }),
+      showFileHistory: (filePath: string, rev?: string | null) => setView({ kind: 'file', path: filePath, mode: 'history', rev }),
+
+      /** Save the files of a revision (optionally one folder) as a zip archive. */
+      async exportFiles(rev: string, label: string, folder?: string) {
+        const name = `${repo.name}-${(label || rev).replace(/[\/]+/g, '-')}${folder ? `-${folder.replace(/[\/]+/g, '-')}` : ''}`;
+        const dest = await run('Exporting files…', () => api.exportArchive(path, rev, name, folder), { noRefresh: true });
+        if (dest) ui.toast('success', `Exported ${folder ?? label}`, dest, { label: 'Reveal', onClick: () => void api.revealExport(dest) });
+      },
       blame: (filePath: string, rev?: string | null) => setView({ kind: 'file', path: filePath, mode: 'blame', rev }),
     };
     return actions;

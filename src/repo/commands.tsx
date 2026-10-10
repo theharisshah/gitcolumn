@@ -65,6 +65,7 @@ export function useCommands(extra: { openPalette?: () => void } = {}): Command[]
       { id: 'repo.reveal', title: 'Show in Finder', group: 'Repository', keywords: ['folder', 'explorer'], run: () => void api.reveal(repo.path).catch(() => undefined) },
       { id: 'repo.terminal', title: 'Open in Terminal', group: 'Repository', keywords: ['shell', 'console'], run: () => void api.openTerminal(repo.path).catch(() => undefined) },
       { id: 'remote.add', title: 'Add Remote…', group: 'Repository', run: () => void actions.addRemote() },
+      { id: 'files.export', title: 'Export Files…', group: 'Repository', keywords: ['zip', 'archive'], enabled: !!status?.head, run: () => void actions.exportFiles('HEAD', status?.branch ?? 'HEAD') },
       { id: 'identity.edit', title: 'Set Commit Author…', group: 'Repository', keywords: ['name', 'email', 'identity'], run: () => void actions.editIdentity() },
       { id: 'branch.new', title: 'New Branch…', group: 'Branch', shortcut: 'mod+shift+b', menu: true, enabled: !!status?.head, run: () => void actions.createBranch() },
       { id: 'tag.new', title: 'New Tag…', group: 'Branch', enabled: !!status?.head, run: () => void actions.createTag() },

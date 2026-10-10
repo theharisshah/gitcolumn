@@ -6,7 +6,9 @@ import type {
   BlobSpec,
   Commit,
   CommitDetail,
+  ChangedFile,
   FileCommit,
+  FileContentResult,
   FileDiff,
   FileStatus,
   LfsFile,
@@ -22,6 +24,7 @@ import type {
   Stash,
   Status,
   Submodule,
+  TreeEntry,
 } from '../../shared/types';
 
 declare global {
@@ -87,7 +90,13 @@ export const api = {
   commitDetail: (repo: string, hash: string) => call<CommitDetail>('commit.detail', { repo, hash }),
   commitDiff: (repo: string, hash: string, parent?: string, paths?: string[]) =>
     call<FileDiff[]>('commit.diff', { repo, hash, parent, paths }),
-  fileHistory: (repo: string, path: string, skip = 0) => call<FileCommit[]>('file.history', { repo, path, skip }),
+  fileHistory: (repo: string, path: string, skip = 0, rev?: string | null) => call<FileCommit[]>('file.history', { repo, path, skip, rev }),
+  treeList: (repo: string, rev: string | null, dir = '') => call<TreeEntry[]>('tree.list', { repo, rev, dir }),
+  filesSearch: (repo: string, rev: string | null) => call<string[]>('files.search', { repo, rev }),
+  fileContent: (repo: string, rev: string | null, path: string) => call<FileContentResult>('file.content', { repo, rev, path }),
+  exportArchive: (repo: string, rev: string, name: string, path?: string) => call<string | null>('archive.export', { repo, rev, name, path }),
+  revealExport: (path: string) => call('archive.reveal', { path }),
+  diffFiles: (repo: string, from: string | null, to: string) => call<ChangedFile[]>('diff.files', { repo, from, to }),
   blame: (repo: string, path: string, rev?: string | null) => call<Blame>('blame', { repo, path, rev }),
   blob: (repo: string, spec: BlobSpec) => call<Blob | null>('file.blob', { repo, ...spec }),
   writeGitignore: (repo: string, content: string) => call('gitignore.write', { repo, content }),

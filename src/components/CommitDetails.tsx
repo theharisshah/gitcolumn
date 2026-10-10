@@ -1,15 +1,25 @@
 import { Copy } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import type { CommitDetail, FileDiff } from '../../shared/types';
 import { api } from '../lib/api';
-import { basename, copyText, dirname, fullDate, hashColor, initials, plural, shortHash } from '../lib/format';
+import { copyText, fullDate, shortHash } from '../lib/format';
 import { useRepo } from '../repo/RepoContext';
 import { useUI } from '../ui/UIProvider';
-import { DiffStat, FileDiffSection } from './DiffView';
+import { Avatar } from './Avatar';
+import { ChangesetView } from './ChangesetView';
+import { FilesBrowser } from './FilesView';
 import { RefBadges, type BadgeRef } from './RefBadges';
-import { StatusBadge } from './StatusBadge';
 
-const AUTO_EXPAND_LINES = 4000;
+type Mode = 'changeset' | 'tree';
+const MODE_KEY = 'gitcolumn.commitDetailsMode';
+
+function loadMode(): Mode {
+  try {
+    return localStorage.getItem(MODE_KEY) === 'tree' ? 'tree' : 'changeset';
+  } catch {
+    return 'changeset';
+  }
+}
 
 export function CommitDetails({ hash, badges, onNavigate }: { hash: string; badges?: BadgeRef[]; onNavigate: (hash: string) => void }) {
   const { repo, setView } = useRepo();
@@ -17,9 +27,20 @@ export function CommitDetails({ hash, badges, onNavigate }: { hash: string; badg
   const [detail, setDetail] = useState<CommitDetail | null>(null);
   const [diffs, setDiffs] = useState<FileDiff[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [mode, setModeState] = useState<Mode>(loadMode);
+
+  const setMode = (m: Mode) => {
+    setModeState(m);
+    try {
+      localStorage.setItem(MODE_KEY, m);
+    } catch {
+      /* ignore */
+    }
+  };
 
   useEffect(() => {
     let cancelled = false;
+    setDiffs(null);
     api
       .commitDetail(repo.path, hash)
       .then(async (d) => {
@@ -37,119 +58,106 @@ export function CommitDetails({ hash, badges, onNavigate }: { hash: string; badg
   if (error) return <div className="empty-state error-text">{error}</div>;
   if (!detail) return <div className="empty-state muted">Loading…</div>;
 
-  let budget = AUTO_EXPAND_LINES;
-  const differentCommitter = detail.committer !== detail.author || detail.committerEmail !== detail.email;
-
-  return (
-    <div className="commit-details">
-      <div className="commit-meta">
-        <h2 className="commit-title">{detail.subject}</h2>
-        {badges && (
-          <div className="commit-refs">
-            <RefBadges badges={badges} />
-          </div>
-        )}
-        {detail.body && <pre className="commit-body">{detail.body}</pre>}
-        <div className="commit-people">
-          <Person name={detail.author} email={detail.email} date={detail.date} role="Author" />
-          {differentCommitter && <Person name={detail.committer} email={detail.committerEmail} date={detail.committerDate} role="Committer" />}
-        </div>
-        <dl className="commit-facts">
-          <dt>SHA</dt>
-          <dd>
-            <span className="mono">{detail.hash}</span>
-            <button
-              className="icon-button"
-              title="Copy SHA"
-              onClick={() => copyText(detail.hash).then(() => ui.toast('info', 'Copied SHA'))}
-            >
-              <Copy size={12} />
-            </button>
-          </dd>
-          {detail.parents.length > 0 && (
-            <>
-              <dt>{detail.parents.length > 1 ? 'Parents' : 'Parent'}</dt>
-              <dd>
-                {detail.parents.map((p) => (
-                  <button key={p} className="link-button mono" onClick={() => onNavigate(p)}>
-                    {shortHash(p)}
-                  </button>
-                ))}
-                {detail.parents.length > 1 && <span className="muted"> · changes shown against first parent</span>}
-              </dd>
-            </>
-          )}
-        </dl>
-      </div>
-      <div className="commit-files">
-        <div className="commit-files-title">
-          {plural(detail.files.length, 'changed file')}
-          <DiffStat
-            additions={detail.files.reduce((n, f) => n + (f.additions ?? 0), 0)}
-            deletions={detail.files.reduce((n, f) => n + (f.deletions ?? 0), 0)}
-          />
-        </div>
-        {detail.files.map((f) => (
-          <button
-            key={f.path}
-            className="commit-file-row"
-            onClick={() => document.getElementById(`diff-${hash}-${f.path}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' })}
-            onContextMenu={(e) =>
-              ui.menu(e, [
-                { label: 'Show File History', onClick: () => setView({ kind: 'file', path: f.path, mode: 'history', select: hash }) },
-                { label: 'Blame at This Commit', disabled: f.status === 'D', onClick: () => setView({ kind: 'file', path: f.path, mode: 'blame', rev: hash }) },
-                'separator',
-                { label: 'Copy Path', onClick: () => copyText(f.path) },
-                { label: 'Reveal in Finder', onClick: () => api.reveal(repo.path, f.path).catch((err) => ui.toast('error', 'Could not reveal file', String(err))) },
-              ])
-            }
-          >
-            <StatusBadge status={f.status} />
-            <span className="file-name" title={f.origPath ? `${f.origPath} → ${f.path}` : f.path}>
-              {basename(f.path)}
-              <span className="file-dir">{dirname(f.path)}</span>
-            </span>
-            {f.binary ? <span className="muted small">binary</span> : <DiffStat additions={f.additions} deletions={f.deletions} />}
+  const copy = (text: string, what: string) => copyText(text).then(() => ui.toast('info', `Copied ${what}`));
+  const hashRow = (label: string, value: ReactNode, raw?: string) => (
+    <>
+      <dt>{label}</dt>
+      <dd>
+        {value}
+        {raw && (
+          <button className="icon-button" title={`Copy ${label.toLowerCase()}`} onClick={() => copy(raw, label.toLowerCase())}>
+            <Copy size={11} />
           </button>
-        ))}
-      </div>
-      <div className="commit-diffs">
-        {!diffs && <div className="diff-note muted">Loading changes…</div>}
-        {diffs?.map((d) => {
-          const lines = d.additions + d.deletions;
-          const open = lines <= budget;
-          budget -= lines;
-          const p = d.newPath || d.oldPath;
-          const parent = detail.parents[0];
-          return (
-            <FileDiffSection
-              key={p}
-              id={`diff-${hash}-${p}`}
-              diff={d}
-              defaultOpen={open}
-              images={{ before: parent ? { revs: [parent], path: d.oldPath } : undefined, after: { revs: [hash], path: d.newPath } }}
-            />
-          );
-        })}
-      </div>
-    </div>
+        )}
+      </dd>
+    </>
   );
-}
+  const parent = detail.parents[0];
 
-function Person({ name, email, date, role }: { name: string; email: string; date: number; role: string }) {
   return (
-    <div className="person">
-      <span className="avatar" style={{ background: hashColor(email || name) }}>
-        {initials(name)}
-      </span>
-      <div>
-        <div>
-          <b>{name}</b> <span className="muted">&lt;{email}&gt;</span>
-        </div>
-        <div className="muted small">
-          {role} · {fullDate(date)}
+    <div className={`commit-details ${mode === 'tree' ? 'tree-mode' : ''}`}>
+      <div className="commit-details-bar">
+        <span className="mono">{shortHash(detail.hash)}</span>
+        <span className="spacer" />
+        <div className="segmented">
+          <button className={mode === 'changeset' ? 'active' : ''} onClick={() => setMode('changeset')}>
+            Changeset
+          </button>
+          <button className={mode === 'tree' ? 'active' : ''} onClick={() => setMode('tree')}>
+            Tree
+          </button>
         </div>
       </div>
+      <div className="commit-meta">
+        <div className="commit-meta-top">
+          <dl className="commit-meta-table">
+            <dt>Author</dt>
+            <dd>
+              {detail.author} <span className="muted">&lt;{detail.email}&gt;</span>
+            </dd>
+            <dt>Author Date</dt>
+            <dd>{fullDate(detail.date)}</dd>
+            <dt>Committer</dt>
+            <dd>
+              {detail.committer} <span className="muted">&lt;{detail.committerEmail}&gt;</span>
+            </dd>
+            <dt>Committer Date</dt>
+            <dd>{fullDate(detail.committerDate)}</dd>
+            {badges?.length ? (
+              <>
+                <dt>Refs</dt>
+                <dd>
+                  <RefBadges badges={badges} />
+                </dd>
+              </>
+            ) : null}
+            {hashRow('Commit Hash', <span className="mono">{detail.hash}</span>, detail.hash)}
+            {detail.parents.length > 0 &&
+              hashRow(
+                detail.parents.length > 1 ? 'Parent Hashes' : 'Parent Hash',
+                <span className="commit-parents">
+                  {detail.parents.map((p) => (
+                    <button key={p} className="link-button mono" onClick={() => onNavigate(p)} title="Show this commit">
+                      {detail.parents.length > 1 ? shortHash(p) : p}
+                    </button>
+                  ))}
+                  {detail.parents.length > 1 && <span className="muted small">changes shown against the first parent</span>}
+                </span>,
+              )}
+            {hashRow(
+              'Tree Hash',
+              <button className="link-button mono" onClick={() => setMode('tree')} title="Browse the files of this commit">
+                {detail.tree}
+              </button>,
+              detail.tree,
+            )}
+          </dl>
+          <Avatar name={detail.author} email={detail.email} size={56} className="commit-avatar" />
+        </div>
+        <h2 className="commit-title">{detail.subject}</h2>
+        {detail.body && <pre className="commit-body">{detail.body}</pre>}
+      </div>
+      {mode === 'changeset' ? (
+        <ChangesetView
+          files={detail.files}
+          diffs={diffs}
+          idPrefix={`diff-${hash}`}
+          imagesFor={(d) => ({ before: parent ? { revs: [parent], path: d.oldPath } : undefined, after: { revs: [hash], path: d.newPath } })}
+          fileMenu={(e, p) =>
+            ui.menu(e, [
+              { label: 'Show File History', onClick: () => setView({ kind: 'file', path: p, mode: 'history', select: hash }) },
+              { label: 'Blame at This Commit', onClick: () => setView({ kind: 'file', path: p, mode: 'blame', rev: hash }) },
+              { label: 'Show in Files', onClick: () => setView({ kind: 'files', rev: hash, label: shortHash(hash), path: p }) },
+              'separator',
+              { label: 'Copy Path', onClick: () => copyText(p) },
+            ])
+          }
+        />
+      ) : (
+        <div className="commit-tree">
+          <FilesBrowser rev={hash} compact />
+        </div>
+      )}
     </div>
   );
 }

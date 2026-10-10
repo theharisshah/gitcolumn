@@ -76,6 +76,8 @@ export interface Commit {
 }
 
 export interface CommitDetail extends Commit {
+  /** Tree object of the commit */
+  tree: string;
   committer: string;
   committerEmail: string;
   committerDate: number;
@@ -278,4 +280,27 @@ export interface Snapshot {
   /** Tree object of the index, or null when the index has conflicts */
   index: string | null;
   files?: FileSnapshot[];
+}
+
+// ------------------------------------------------------------------- files
+
+export interface TreeEntry {
+  name: string;
+  /** Path from the repository root, '/'-separated */
+  path: string;
+  /** commit = submodule (gitlink) */
+  type: 'blob' | 'tree' | 'commit' | 'symlink';
+  mode?: string;
+  oid?: string;
+  size?: number;
+}
+
+export interface FileContentResult {
+  kind: 'text' | 'binary' | 'image' | 'lfs' | 'symlink' | 'submodule' | 'missing';
+  /** Text content (text, lfs pointer, symlink target) */
+  content: string;
+  size: number;
+  truncated: boolean;
+  oid?: string;
+  submodule?: { commit: string; url?: string };
 }

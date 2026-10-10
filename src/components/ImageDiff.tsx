@@ -14,7 +14,7 @@ interface Loaded {
   height?: number;
 }
 
-function useBlob(spec?: BlobSpec): Loaded | undefined {
+export function useBlob(spec?: BlobSpec): Loaded | undefined {
   const { repo, version } = useRepo();
   const [state, setState] = useState<Loaded | undefined>(undefined);
   const key = spec ? JSON.stringify(spec) : '';
@@ -108,6 +108,27 @@ export function ImageDiff({ before, after }: { before?: BlobSpec; after?: BlobSp
           {after && panel('After', 'after', b, after)}
         </div>
       )}
+    </div>
+  );
+}
+
+/** A single image (file view), with its dimensions and size. */
+export function ImagePreview({ spec }: { spec: BlobSpec }) {
+  const l = useBlob(spec);
+  return (
+    <div className="image-diff">
+      <figure className="image-panel">
+        <figcaption>
+          {l?.blob && (
+            <span className="muted small">
+              {l.width}×{l.height} · {formatSize(l.blob.size)}
+            </span>
+          )}
+        </figcaption>
+        <div className="image-frame checkerboard">
+          {!l ? <span className="muted small">Loading…</span> : l.blob ? <img src={l.blob.dataUrl} alt={spec.path} /> : <span className="muted small">Can’t display this image</span>}
+        </div>
+      </figure>
     </div>
   );
 }
