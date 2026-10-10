@@ -1,4 +1,5 @@
 import { CloudDownload, FolderOpen, FolderPlus, X } from 'lucide-react';
+import iconUrl from '../../build/icon.svg';
 import type { AppInfo } from '../../shared/types';
 import { isElectron } from '../lib/api';
 import { relativeTime, tildify } from '../lib/format';
@@ -10,27 +11,11 @@ export interface Recent {
 }
 
 export function Logo({ size = 64 }: { size?: number }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 64 64" aria-hidden>
-      <defs>
-        <linearGradient id="gc-bg" x1="0" y1="0" x2="1" y2="1">
-          <stop offset="0" stopColor="#4f8cff" />
-          <stop offset="1" stopColor="#2457d6" />
-        </linearGradient>
-      </defs>
-      <rect x="2" y="2" width="60" height="60" rx="14" fill="url(#gc-bg)" />
-      <g stroke="#fff" strokeWidth="3.5" strokeLinecap="round" fill="none">
-        <line x1="22" y1="14" x2="22" y2="50" />
-        <path d="M22 40 C22 30, 42 32, 42 22" />
-        <line x1="42" y1="14" x2="42" y2="22" />
-      </g>
-      <g fill="#fff">
-        <circle cx="22" cy="18" r="5" />
-        <circle cx="22" cy="46" r="5" />
-        <circle cx="42" cy="22" r="5" />
-      </g>
-    </svg>
-  );
+  // The artwork has the macOS icon grid's ~10% margin built in. Scale it up so the tile itself is
+  // `size` wide, and pull that margin back in so the layout box is exactly size × size.
+  const drawn = size * 1.24;
+  const inset = (drawn - size) / 2;
+  return <img src={iconUrl} width={drawn} height={drawn} alt="" draggable={false} style={{ margin: -inset }} />;
 }
 
 export function Welcome({

@@ -1,22 +1,55 @@
 import { useMemo } from 'react';
-import type { Commit, FileStatus, Ref, Stash } from '../../shared/types';
+import type { Commit, FileDiff, FileStatus, LineSelection, PatchAction, RebaseStep, Ref, Snapshot, Stash } from '../../shared/types';
+import { RebaseDialog } from '../components/RebaseDialog';
 import { api } from '../lib/api';
 import { plural, shortHash } from '../lib/format';
+import { getSetting } from '../lib/settings';
 import { useUI } from '../ui/UIProvider';
-import { useRepo } from './RepoContext';
+import { useRepo, type UndoEntry } from './RepoContext';
 
-/** High-level git operations with their confirmation dialogs, shared by toolbar, sidebar and menus. */
+const STALE = 'The repository changed since then, so this can no longer be undone.';
+
+/** High-level git operations with their confirmation dialogs and undo, shared by toolbar, sidebar and menus. */
 export function useActions() {
   const ui = useUI();
   const ctx = useRepo();
-  const { repo, run, status, refs, remotes, currentBranch } = ctx;
+  const { repo, run, status, refs, remotes, setView } = ctx;
   const path = repo.path;
 
   return useMemo(() => {
     const headName = status?.branch ?? (status?.head ? `HEAD (${shortHash(status.head)})` : 'HEAD');
     const localExists = (name: string) => refs.some((r) => r.type === 'head' && r.name === name);
+    const pathsOf = (files: FileStatus[]) => files.flatMap((f) => (f.origPath ? [f.path, f.origPath] : [f.path]));
+
+    // ------------------------------------------------------------ undo helpers
+    const currentHead = () => api.revParse(path, 'HEAD');
+    const expectHead = async (expected: string | null) => {
+      if ((await currentHead()) !== expected) throw new Error(STALE);
+    };
+    /** Undo an operation that moved HEAD (merge, rebase, pull, cherry-pick…) by resetting back, keeping local changes. */
+    const undoHeadMove = (label: string, before: Snapshot) => async (): Promise<UndoEntry | null> => {
+      const after = await currentHead();
+      if (!before.head || after === before.head) return null;
+      return {
+        label,
+        run: async () => {
+          await expectHead(after);
+          await api.reset(path, before.head!, 'keep');
+        },
+      };
+    };
+    /** Undo an index-only change (stage / unstage) by restoring the previous index tree. */
+    const undoIndex = (label: string, before: Snapshot) => (): UndoEntry | null =>
+      before.index ? { label, run: () => api.restoreSnapshot(path, { ...before, files: undefined }) } : null;
+    /** Return to the branch (or detached commit) that was checked out before. */
+    const switchBack = async (before: Snapshot) => {
+      if (before.branch) await api.checkout(path, before.branch);
+      else if (before.head) await api.checkoutDetached(path, before.head);
+    };
 
     const actions = {
+      undo: () => ctx.undo(),
+
       fetch: (remote?: string) =>
         run(remote ? `Fetching ${remote}…` : 'Fetching…', () => api.fetch(path, remote), {
           success: remotes.length ? 'Fetched from ' + (remote ?? plural(remotes.length, 'remote')) : undefined,
@@ -25,8 +58,11 @@ export function useActions() {
       async pull() {
         if (!status?.branch) return ui.toast('warning', 'Cannot pull in detached HEAD state');
         if (!status.upstream) return ui.toast('warning', `"${status.branch}" has no upstream branch`, 'Push the branch first, or set an upstream from the sidebar.');
-        const rebase = localStorage.getItem('gitcolumn.pullRebase') === '1';
-        return run('Pulling…', () => api.pull(path, rebase), { success: `Pulled ${status.upstream}` });
+        const before = await api.snapshot(path);
+        return run('Pulling…', () => api.pull(path, getSetting('pullRebase')), {
+          success: `Pulled ${status.upstream}`,
+          undo: undoHeadMove('Pull', before),
+        });
       },
 
       async push(branch = status?.branch ?? undefined, opts: { force?: boolean } = {}) {
@@ -47,7 +83,13 @@ export function useActions() {
                 ? undefined
                 : 'This branch is not tracking a remote branch yet.',
             fields: [
-              { name: 'remote', label: 'Remote', type: 'select', options: (remotes.length ? remotes : [{ name: 'origin' }]).map((r) => ({ value: r.name, label: r.name })), value: ref?.upstream?.split('/')[0] ?? remotes.find((r) => r.name === 'origin')?.name },
+              {
+                name: 'remote',
+                label: 'Remote',
+                type: 'select',
+                options: (remotes.length ? remotes : [{ name: 'origin' }]).map((r) => ({ value: r.name, label: r.name })),
+                value: ref?.upstream?.split('/')[0] ?? remotes.find((r) => r.name === 'origin')?.name,
+              },
               ...(force ? [] : [{ name: 'force', label: 'Force push (with lease)', type: 'checkbox' as const }]),
             ],
             confirmLabel: force ? 'Force Push' : 'Push',
@@ -62,10 +104,105 @@ export function useActions() {
         });
       },
 
+      // ------------------------------------------------------------ staging
+      async stage(paths: string[]) {
+        if (!paths.length) return;
+        const before = await api.snapshot(path);
+        return run('Staging…', () => api.stage(path, paths), { undo: undoIndex('Stage', before) });
+      },
+
+      async unstage(paths: string[]) {
+        if (!paths.length) return;
+        const before = await api.snapshot(path);
+        return run('Unstaging…', () => api.unstage(path, paths), { undo: undoIndex('Unstage', before) });
+      },
+
+      async stageAll() {
+        const before = await api.snapshot(path);
+        return run('Staging…', () => api.stageAll(path), { undo: undoIndex('Stage All', before) });
+      },
+
+      async unstageAll() {
+        const before = await api.snapshot(path);
+        return run('Unstaging…', () => api.unstageAll(path), { undo: undoIndex('Unstage All', before) });
+      },
+
+      async applyPatch(diff: FileDiff, selection: LineSelection, action: PatchAction) {
+        const file = diff.newPath || diff.oldPath;
+        if (action === 'discard') {
+          const ok = await ui.confirm({
+            title: 'Discard these changes?',
+            message: 'The selected changes will be removed from your working copy. You can undo this with ⌘Z.',
+            confirmLabel: 'Discard',
+            danger: true,
+          });
+          if (!ok) return;
+        }
+        const before = await api.snapshot(path, action === 'discard' ? [file] : undefined);
+        const label = action === 'stage' ? 'Stage Lines' : action === 'unstage' ? 'Unstage Lines' : 'Discard Lines';
+        return run(action === 'stage' ? 'Staging…' : action === 'unstage' ? 'Unstaging…' : 'Discarding…', () => api.applyPatch(path, diff, selection, action), {
+          undo: () => (action === 'discard' ? { label, run: () => api.restoreSnapshot(path, before) } : undoIndex(label, before)()),
+          success: action === 'discard' ? 'Changes discarded' : undefined,
+        });
+      },
+
+      async discard(files: FileStatus[]) {
+        if (!files.length) return;
+        const untracked = files.filter((f) => f.untracked).length;
+        const ok = await ui.confirm({
+          title: `Discard changes in ${files.length === 1 ? `"${files[0].path}"` : plural(files.length, 'file')}?`,
+          message:
+            (untracked && window.gitcolumn ? 'Untracked files will be moved to the Trash. ' : '') + 'You can undo this with ⌘Z while GitColumn is open.',
+          confirmLabel: 'Discard',
+          danger: true,
+        });
+        if (!ok) return;
+        const before = await api.snapshot(path, pathsOf(files));
+        return run('Discarding…', () => api.discard(path, files), {
+          success: `Discarded ${files.length === 1 ? files[0].path : plural(files.length, 'file')}`,
+          undo: () => ({ label: 'Discard', run: () => api.restoreSnapshot(path, before) }),
+        });
+      },
+
+      async commit(message: string, opts: { amend?: boolean; stageAll?: boolean; undoable?: boolean } = {}) {
+        const before = await api.snapshot(path);
+        const subject = message.split('\n')[0];
+        return run(
+          opts.amend ? 'Amending commit…' : 'Committing…',
+          async () => {
+            if (opts.stageAll) await api.stageAll(path);
+            await api.commit(path, message, opts.amend);
+            return true;
+          },
+          {
+            success: opts.amend ? 'Commit amended' : `Committed “${subject}”`,
+            undo: async () => {
+              // A soft reset can't restore MERGE_HEAD, so merge commits aren't undoable this way.
+              if (opts.undoable === false) return null;
+              const after = await currentHead();
+              return {
+                label: opts.amend ? 'Amend' : 'Commit',
+                run: async () => {
+                  await expectHead(after);
+                  if (before.head) await api.reset(path, before.head, 'soft');
+                  else if (before.branch) await api.deleteRef(path, `refs/heads/${before.branch}`);
+                  window.dispatchEvent(new CustomEvent('gitcolumn:restore-message', { detail: { repo: path, message } }));
+                },
+              };
+            },
+          },
+        );
+      },
+
+      // ----------------------------------------------------------- branches
       async createBranch(start?: string, startLabel?: string) {
         const v = await ui.form({
           title: 'Create New Branch',
-          message: <>Based on <b>{startLabel ?? start ?? headName}</b></>,
+          message: (
+            <>
+              Based on <b>{startLabel ?? start ?? headName}</b>
+            </>
+          ),
           fields: [
             { name: 'name', label: 'Branch name', placeholder: 'feature/my-change', required: true, mono: true },
             { name: 'checkout', label: 'Check out new branch', type: 'checkbox', value: true },
@@ -75,20 +212,38 @@ export function useActions() {
         });
         if (!v) return;
         const name = String(v.name).trim();
+        const before = await api.snapshot(path);
         return run('Creating branch…', () => api.createBranch(path, name, start, !!v.checkout), {
           success: v.checkout ? `Created and checked out ${name}` : `Created ${name}`,
+          undo: () => ({
+            label: 'Create Branch',
+            run: async () => {
+              if (v.checkout) await switchBack(before);
+              await api.deleteBranch(path, name, true);
+            },
+          }),
         });
       },
 
-      checkout(ref: Ref) {
+      async checkout(ref: Ref) {
+        const before = await api.snapshot(path);
+        const back = () => ({ label: 'Checkout', run: () => switchBack(before) });
         if (ref.type === 'head') {
           if (ref.current) return;
-          return run(`Checking out ${ref.name}…`, () => api.checkout(path, ref.name), { success: `Checked out ${ref.name}` });
+          return run(`Checking out ${ref.name}…`, () => api.checkout(path, ref.name), { success: `Checked out ${ref.name}`, undo: back });
         }
         if (ref.type === 'remote') {
           const local = ref.name.slice((ref.remote?.length ?? 0) + 1);
+          const existed = localExists(local);
           return run(`Checking out ${local}…`, () => api.checkoutRemote(path, ref.name, local), {
-            success: localExists(local) ? `Checked out ${local}` : `Created ${local} tracking ${ref.name}`,
+            success: existed ? `Checked out ${local}` : `Created ${local} tracking ${ref.name}`,
+            undo: () => ({
+              label: 'Checkout',
+              run: async () => {
+                await switchBack(before);
+                if (!existed) await api.deleteBranch(path, local, true);
+              },
+            }),
           });
         }
         return actions.checkoutDetached(ref.name, `tag ${ref.name}`);
@@ -100,45 +255,68 @@ export function useActions() {
           message: 'You will be in "detached HEAD" state. Commits you make won\'t belong to any branch unless you create one.',
           confirmLabel: 'Check Out',
         });
-        if (ok) return run('Checking out…', () => api.checkoutDetached(path, rev), { success: `Checked out ${label}` });
+        if (!ok) return;
+        const before = await api.snapshot(path);
+        return run('Checking out…', () => api.checkoutDetached(path, rev), {
+          success: `Checked out ${label}`,
+          undo: () => ({ label: 'Checkout', run: () => switchBack(before) }),
+        });
       },
 
       async deleteBranch(ref: Ref) {
         const v = await ui.form({
           title: `Delete branch "${ref.name}"?`,
-          message: 'The local branch will be removed. Commits that are not on any other branch can only be recovered from the reflog.',
+          message: 'The local branch will be removed. You can undo this with ⌘Z.',
           fields: ref.upstream && !ref.upstreamGone ? [{ name: 'remote', type: 'checkbox', label: `Also delete "${ref.upstream}" on the remote` }] : [],
           confirmLabel: 'Delete',
           danger: true,
         });
         if (!v) return;
-        await run(`Deleting ${ref.name}…`, async () => {
-          try {
-            await api.deleteBranch(path, ref.name, false);
-          } catch (e) {
-            const msg = e instanceof Error ? e.message : String(e);
-            if (!/not fully merged/.test(msg)) throw e;
-            const force = await ui.confirm({
-              title: `"${ref.name}" is not fully merged`,
-              message: 'It contains commits that are not on your current branch or its upstream. Delete it anyway?',
-              confirmLabel: 'Force Delete',
-              danger: true,
-            });
-            if (!force) return;
-            await api.deleteBranch(path, ref.name, true);
-          }
-          if (v.remote && ref.upstream) {
-            const [remote, ...rest] = ref.upstream.split('/');
-            await api.deleteRemoteBranch(path, remote, rest.join('/'));
-          }
-        });
+        let deleted = false;
+        await run(
+          `Deleting ${ref.name}…`,
+          async () => {
+            try {
+              await api.deleteBranch(path, ref.name, false);
+            } catch (e) {
+              const msg = e instanceof Error ? e.message : String(e);
+              if (!/not fully merged/.test(msg)) throw e;
+              const force = await ui.confirm({
+                title: `"${ref.name}" is not fully merged`,
+                message: 'It contains commits that are not on your current branch or its upstream. Delete it anyway?',
+                confirmLabel: 'Force Delete',
+                danger: true,
+              });
+              if (!force) return;
+              await api.deleteBranch(path, ref.name, true);
+            }
+            deleted = true;
+            if (v.remote && ref.upstream) {
+              const [remote, ...rest] = ref.upstream.split('/');
+              await api.deleteRemoteBranch(path, remote, rest.join('/'));
+            }
+          },
+          {
+            success: () => (deleted ? `Deleted ${ref.name}` : undefined),
+            undo: () =>
+              deleted
+                ? {
+                    label: 'Delete Branch',
+                    run: async () => {
+                      await api.updateRef(path, ref.ref, ref.hash);
+                      if (ref.upstream && !v.remote) await api.setUpstream(path, ref.name, ref.upstream).catch(() => undefined);
+                    },
+                  }
+                : null,
+          },
+        );
       },
 
       async deleteRemoteBranch(ref: Ref) {
         const name = ref.name.slice((ref.remote?.length ?? 0) + 1);
         const ok = await ui.confirm({
           title: `Delete "${ref.name}" from the remote?`,
-          message: `The branch "${name}" will be deleted on "${ref.remote}" for everyone.`,
+          message: `The branch "${name}" will be deleted on "${ref.remote}" for everyone. This cannot be undone from GitColumn.`,
           confirmLabel: 'Delete on Remote',
           danger: true,
         });
@@ -152,8 +330,12 @@ export function useActions() {
           validate: (v) => validateRefName(String(v.name)),
           confirmLabel: 'Rename',
         });
-        if (!v || String(v.name).trim() === ref.name) return;
-        return run('Renaming branch…', () => api.renameBranch(path, ref.name, String(v.name).trim()));
+        const newName = String(v?.name ?? '').trim();
+        if (!v || newName === ref.name) return;
+        return run('Renaming branch…', () => api.renameBranch(path, ref.name, newName), {
+          success: `Renamed ${ref.name} to ${newName}`,
+          undo: () => ({ label: 'Rename', run: () => api.renameBranch(path, newName, ref.name) }),
+        });
       },
 
       async setUpstream(ref: Ref) {
@@ -173,14 +355,21 @@ export function useActions() {
           confirmLabel: 'Save',
         });
         if (!v) return;
-        return run('Updating tracking…', () => api.setUpstream(path, ref.name, String(v.upstream) || null));
+        return run('Updating tracking…', () => api.setUpstream(path, ref.name, String(v.upstream) || null), {
+          undo: () => ({ label: 'Track Branch', run: () => api.setUpstream(path, ref.name, ref.upstream ?? null) }),
+        });
       },
 
+      // --------------------------------------------------- merge & rebase
       async merge(name: string) {
         if (!status?.branch) return ui.toast('warning', 'Check out a branch before merging');
         const v = await ui.form({
           title: 'Merge',
-          message: <>Merge <b>{name}</b> into <b>{status.branch}</b></>,
+          message: (
+            <>
+              Merge <b>{name}</b> into <b>{status.branch}</b>
+            </>
+          ),
           fields: [
             {
               name: 'mode',
@@ -196,8 +385,10 @@ export function useActions() {
           confirmLabel: 'Merge',
         });
         if (!v) return;
+        const before = await api.snapshot(path);
         return run(`Merging ${name}…`, () => api.merge(path, name, { noFF: v.mode === 'noff', squash: v.mode === 'squash' }), {
           success: v.mode === 'squash' ? `Squashed ${name} — review and commit the staged changes` : `Merged ${name} into ${status.branch}`,
+          undo: (r) => (r?.conflicts || v.mode === 'squash' ? null : undoHeadMove('Merge', before)()),
         });
       },
 
@@ -213,9 +404,122 @@ export function useActions() {
           ),
           confirmLabel: 'Rebase',
         });
-        if (ok) return run(`Rebasing onto ${onto}…`, () => api.rebase(path, onto), { success: `Rebased ${status.branch} onto ${onto}` });
+        if (!ok) return;
+        const before = await api.snapshot(path);
+        return run(`Rebasing onto ${onto}…`, () => api.rebase(path, onto), {
+          success: `Rebased ${status.branch} onto ${onto}`,
+          undo: (r) => (r?.conflicts ? null : undoHeadMove('Rebase', before)()),
+        });
       },
 
+      /** Open the interactive rebase editor for the commits after `base` (null = whole history). */
+      async interactiveRebase(base: string | null, preset?: (steps: RebaseStep[]) => RebaseStep[]) {
+        if (!status?.branch) return ui.toast('warning', 'Check out a branch before rebasing');
+        let plan;
+        try {
+          plan = await api.rebasePlan(path, base);
+        } catch (e) {
+          return ui.toast('error', 'Can’t start interactive rebase', e instanceof Error ? e.message : String(e));
+        }
+        if (!plan.commits.length) return ui.toast('info', 'There are no commits after this one to rebase');
+        if (plan.hasMerges) {
+          return ui.toast('warning', 'This range contains merge commits', 'Interactive rebase would flatten them. Start from a commit after the most recent merge.');
+        }
+        const initial = plan.commits.map((c): RebaseStep => ({ action: 'pick', hash: c.hash }));
+        const steps = await ui.modal<RebaseStep[]>((close) => (
+          <RebaseDialog branch={status.branch!} plan={plan} initial={preset ? preset(initial) : initial} onClose={close} />
+        ));
+        if (!steps) return;
+        return actions.runRebase(plan.base, steps);
+      },
+
+      async runRebase(base: string | null, steps: RebaseStep[]) {
+        const before = await api.snapshot(path);
+        return run('Rebasing…', () => api.rebaseInteractive(path, base, steps), {
+          success: (r) => (r?.paused ? 'Rebase paused — amend the commit, then click Continue' : 'Interactive rebase complete'),
+          undo: (r) => (r?.conflicts || r?.paused ? null : undoHeadMove('Interactive Rebase', before)()),
+        });
+      },
+
+      /** Quick action: change a commit message (amends directly for HEAD). */
+      async rewordCommit(c: Commit) {
+        const detail = await api.commitDetail(path, c.hash);
+        const v = await ui.form({
+          title: 'Edit Commit Message',
+          message: <span className="mono">{shortHash(c.hash)}</span>,
+          fields: [
+            { name: 'subject', label: 'Subject', value: detail.subject, required: true },
+            { name: 'body', label: 'Description', type: 'textarea', value: detail.body },
+          ],
+          confirmLabel: 'Save Message',
+        });
+        if (!v) return;
+        const message = String(v.body).trim() ? `${String(v.subject).trim()}\n\n${String(v.body).trim()}` : String(v.subject).trim();
+        if (c.hash === status?.head) {
+          const before = await api.snapshot(path);
+          return run('Rewording…', () => api.commit(path, message, true), {
+            success: 'Commit message updated',
+            undo: undoHeadMove('Edit Message', before),
+          });
+        }
+        if (!c.parents[0]) return ui.toast('warning', 'Editing the first commit isn’t supported');
+        const plan = await api.rebasePlan(path, c.parents[0]).catch((e) => {
+          ui.toast('error', 'Can’t edit this commit', String(e instanceof Error ? e.message : e));
+          return null;
+        });
+        if (!plan) return;
+        if (plan.hasMerges) return ui.toast('warning', 'Can’t edit this commit', 'There are merge commits after it.');
+        return actions.runRebase(
+          plan.base,
+          plan.commits.map((pc) => (pc.hash === c.hash ? { action: 'reword', hash: pc.hash, message } : { action: 'pick', hash: pc.hash })),
+        );
+      },
+
+      /** Quick action: squash or fixup a commit into its parent. */
+      async squashIntoParent(c: Commit, mode: 'squash' | 'fixup') {
+        const parent = c.parents[0];
+        if (!parent) return ui.toast('warning', 'The first commit has no parent to squash into');
+        const grand = await api.revParse(path, `${parent}^`);
+        if (!grand) return ui.toast('warning', 'Squashing into the root commit isn’t supported');
+        const plan = await api.rebasePlan(path, grand).catch(() => null);
+        if (!plan) return ui.toast('error', 'That commit is not on the current branch');
+        if (plan.hasMerges) return ui.toast('warning', 'Can’t squash here', 'There are merge commits in the way.');
+        const ok = await ui.confirm({
+          title: mode === 'squash' ? 'Squash into parent?' : 'Fixup into parent?',
+          message:
+            mode === 'squash'
+              ? `“${c.subject}” will be combined with its parent commit, keeping both messages.`
+              : `“${c.subject}” will be folded into its parent commit and its message discarded.`,
+          confirmLabel: mode === 'squash' ? 'Squash' : 'Fixup',
+        });
+        if (!ok) return;
+        return actions.runRebase(
+          plan.base,
+          plan.commits.map((pc) => ({ action: pc.hash === c.hash ? mode : 'pick', hash: pc.hash })),
+        );
+      },
+
+      /** Quick action: remove a commit from the branch. */
+      async dropCommit(c: Commit) {
+        const parent = c.parents[0];
+        const plan = await api.rebasePlan(path, parent ?? null).catch(() => null);
+        if (!plan) return ui.toast('error', 'That commit is not on the current branch');
+        if (plan.hasMerges) return ui.toast('warning', 'Can’t drop this commit', 'There are merge commits after it.');
+        if (plan.commits.length === 1 && !parent) return ui.toast('warning', 'Can’t drop the only commit');
+        const ok = await ui.confirm({
+          title: 'Drop commit?',
+          message: `“${c.subject}” and its changes will be removed from ${headName}. You can undo this with ⌘Z.`,
+          confirmLabel: 'Drop Commit',
+          danger: true,
+        });
+        if (!ok) return;
+        return actions.runRebase(
+          plan.base,
+          plan.commits.map((pc) => ({ action: pc.hash === c.hash ? 'drop' : 'pick', hash: pc.hash })),
+        );
+      },
+
+      // ------------------------------------------------------------ stashes
       async stashSave() {
         const v = await ui.form({
           title: 'Stash Local Changes',
@@ -229,23 +533,63 @@ export function useActions() {
         if (!v) return;
         return run('Stashing…', () => api.stashSave(path, { message: String(v.message), includeUntracked: !!v.untracked, keepIndex: !!v.keepIndex }), {
           success: 'Changes stashed',
+          undo: async () => {
+            const top = (await api.stashes(path))[0];
+            if (!top) return null;
+            return {
+              label: 'Stash',
+              run: async () => {
+                const now = (await api.stashes(path))[0];
+                if (now?.hash !== top.hash) throw new Error(STALE);
+                await api.stashApply(path, top.ref, true);
+              },
+            };
+          },
         });
       },
 
-      stashApply: (s: Stash, pop: boolean) =>
-        run(pop ? 'Popping stash…' : 'Applying stash…', () => api.stashApply(path, s.ref, pop), {
+      async stashApply(s: Stash, pop: boolean) {
+        const diffs = await api.stashDiff(path, s.ref).catch(() => [] as FileDiff[]);
+        const touched = diffs.flatMap((d) => [d.oldPath, d.newPath]).filter(Boolean);
+        const before = await api.snapshot(path, touched);
+        return run(pop ? 'Popping stash…' : 'Applying stash…', () => api.stashApply(path, s.ref, pop), {
           success: pop ? 'Stash applied and removed' : 'Stash applied',
-        }),
-
-      async stashDrop(s: Stash) {
-        const ok = await ui.confirm({ title: 'Delete stash?', message: <>“{s.message}” will be permanently deleted.</>, confirmLabel: 'Delete', danger: true });
-        if (ok) return run('Deleting stash…', () => api.stashDrop(path, s.ref));
+          undo: (r) =>
+            r?.conflicts
+              ? null
+              : {
+                  label: pop ? 'Pop Stash' : 'Apply Stash',
+                  run: async () => {
+                    await api.restoreSnapshot(path, before);
+                    if (pop) await api.stashStore(path, s.hash, s.message);
+                  },
+                },
+        });
       },
 
+      async stashDrop(s: Stash) {
+        const ok = await ui.confirm({
+          title: 'Delete stash?',
+          message: <>“{s.message}” will be deleted. You can undo this with ⌘Z.</>,
+          confirmLabel: 'Delete',
+          danger: true,
+        });
+        if (!ok) return;
+        return run('Deleting stash…', () => api.stashDrop(path, s.ref), {
+          success: 'Stash deleted',
+          undo: () => ({ label: 'Delete Stash', run: () => api.stashStore(path, s.hash, s.message) }),
+        });
+      },
+
+      // --------------------------------------------------------------- tags
       async createTag(target?: string, label?: string) {
         const v = await ui.form({
           title: 'Create New Tag',
-          message: <>On <b>{label ?? headName}</b></>,
+          message: (
+            <>
+              On <b>{label ?? headName}</b>
+            </>
+          ),
           fields: [
             { name: 'name', label: 'Tag name', placeholder: 'v1.0.0', required: true, mono: true },
             { name: 'message', label: 'Message', type: 'textarea', placeholder: 'Optional — creates an annotated tag' },
@@ -256,10 +600,17 @@ export function useActions() {
         });
         if (!v) return;
         const name = String(v.name).trim();
-        return run('Creating tag…', async () => {
-          await api.createTag(path, name, target, String(v.message ?? '').trim() || undefined);
-          if (v.push) await api.pushTag(path, name, remotes[0].name);
-        }, { success: `Created tag ${name}` });
+        return run(
+          'Creating tag…',
+          async () => {
+            await api.createTag(path, name, target, String(v.message ?? '').trim() || undefined);
+            if (v.push) await api.pushTag(path, name, remotes[0].name);
+          },
+          {
+            success: `Created tag ${name}`,
+            undo: () => (v.push ? null : { label: 'Create Tag', run: () => api.deleteTag(path, name) }),
+          },
+        );
       },
 
       async deleteTag(name: string) {
@@ -270,24 +621,47 @@ export function useActions() {
           danger: true,
         });
         if (!v) return;
-        return run('Deleting tag…', async () => {
-          await api.deleteTag(path, name);
-          if (v.remote) await api.deleteRemoteTag(path, name, remotes[0].name);
-        });
+        const object = await api.revParse(path, `refs/tags/${name}`);
+        return run(
+          'Deleting tag…',
+          async () => {
+            await api.deleteTag(path, name);
+            if (v.remote) await api.deleteRemoteTag(path, name, remotes[0].name);
+          },
+          {
+            success: `Deleted tag ${name}`,
+            undo: () => (object && !v.remote ? { label: 'Delete Tag', run: () => api.updateRef(path, `refs/tags/${name}`, object) } : null),
+          },
+        );
       },
 
       pushTag: (name: string) => run(`Pushing tag ${name}…`, () => api.pushTag(path, name), { success: `Pushed tag ${name}` }),
 
-      cherryPick: (c: Commit) =>
-        run('Cherry-picking…', () => api.cherryPick(path, c.hash), { success: `Cherry-picked ${shortHash(c.hash)} onto ${headName}` }),
+      // ------------------------------------------------------- commit actions
+      async cherryPick(c: Commit) {
+        const before = await api.snapshot(path);
+        return run('Cherry-picking…', () => api.cherryPick(path, c.hash), {
+          success: `Cherry-picked ${shortHash(c.hash)} onto ${headName}`,
+          undo: (r) => (r?.conflicts ? null : undoHeadMove('Cherry-Pick', before)()),
+        });
+      },
 
       async revert(c: Commit) {
         const ok = await ui.confirm({
           title: 'Revert commit?',
-          message: <>Creates a new commit that undoes the changes from <b>{shortHash(c.hash)}</b> “{c.subject}”.</>,
+          message: (
+            <>
+              Creates a new commit that undoes the changes from <b>{shortHash(c.hash)}</b> “{c.subject}”.
+            </>
+          ),
           confirmLabel: 'Revert',
         });
-        if (ok) return run('Reverting…', () => api.revert(path, c.hash, c.parents.length > 1 ? 1 : undefined), { success: `Reverted ${shortHash(c.hash)}` });
+        if (!ok) return;
+        const before = await api.snapshot(path);
+        return run('Reverting…', () => api.revert(path, c.hash, c.parents.length > 1 ? 1 : undefined), {
+          success: `Reverted ${shortHash(c.hash)}`,
+          undo: (r) => (r?.conflicts ? null : undoHeadMove('Revert', before)()),
+        });
       },
 
       async reset(c: Commit) {
@@ -302,7 +676,7 @@ export function useActions() {
               options: [
                 { value: 'soft', label: 'Soft', description: 'Keep all changes, staged' },
                 { value: 'mixed', label: 'Mixed', description: 'Keep all changes, unstaged' },
-                { value: 'hard', label: 'Hard', description: 'Discard all local changes — cannot be undone' },
+                { value: 'hard', label: 'Hard', description: 'Discard all local changes — uncommitted work cannot be recovered' },
               ],
             },
           ],
@@ -320,7 +694,25 @@ export function useActions() {
           });
           if (!sure) return;
         }
-        return run('Resetting…', () => api.reset(path, c.hash, mode), { success: `Reset ${headName} to ${shortHash(c.hash)}` });
+        const before = await api.snapshot(path);
+        return run('Resetting…', () => api.reset(path, c.hash, mode), {
+          success: `Reset ${headName} to ${shortHash(c.hash)}`,
+          undo: async () => {
+            const after = await currentHead();
+            if (!before.head) return null;
+            return {
+              label: 'Reset',
+              run: async () => {
+                await expectHead(after);
+                if (mode === 'hard') await api.reset(path, before.head!, 'keep');
+                else {
+                  await api.reset(path, before.head!, 'soft');
+                  await api.restoreSnapshot(path, { ...before, files: undefined });
+                }
+              },
+            };
+          },
+        });
       },
 
       async undoLastCommit(c: Commit) {
@@ -330,24 +722,20 @@ export function useActions() {
           message: <>“{c.subject}” will be removed from {headName}; its changes stay staged in your working copy.</>,
           confirmLabel: 'Undo Commit',
         });
-        if (ok) return run('Undoing commit…', () => api.reset(path, c.parents[0], 'soft'), { success: 'Commit undone — changes are staged' });
-      },
-
-      async discard(files: FileStatus[]) {
-        if (!files.length) return;
-        const untracked = files.filter((f) => f.untracked).length;
-        const ok = await ui.confirm({
-          title: `Discard changes in ${files.length === 1 ? `"${files[0].path}"` : plural(files.length, 'file')}?`,
-          message:
-            untracked && window.gitcolumn
-              ? 'Untracked files will be moved to the Trash. Changes to tracked files will be lost.'
-              : 'This cannot be undone.',
-          confirmLabel: 'Discard',
-          danger: true,
+        if (!ok) return;
+        return run('Undoing commit…', () => api.reset(path, c.parents[0], 'soft'), {
+          success: 'Commit undone — changes are staged',
+          undo: () => ({
+            label: 'Undo Commit',
+            run: async () => {
+              await expectHead(c.parents[0]);
+              await api.reset(path, c.hash, 'soft');
+            },
+          }),
         });
-        if (ok) return run('Discarding…', () => api.discard(path, files));
       },
 
+      // ------------------------------------------------------------ remotes
       async addRemote(): Promise<boolean> {
         const v = await ui.form({
           title: 'Add Remote',
@@ -358,24 +746,35 @@ export function useActions() {
           confirmLabel: 'Add Remote',
         });
         if (!v) return false;
-        const res = await run('Adding remote…', async () => {
-          await api.addRemote(path, String(v.name).trim(), String(v.url).trim());
-          await api.fetch(path, String(v.name).trim()).catch(() => undefined);
-          return true;
-        });
+        const name = String(v.name).trim();
+        const res = await run(
+          'Adding remote…',
+          async () => {
+            await api.addRemote(path, name, String(v.url).trim());
+            await api.fetch(path, name).catch(() => undefined);
+            return true;
+          },
+          { success: `Added remote ${name}`, undo: () => ({ label: 'Add Remote', run: () => api.removeRemote(path, name) }) },
+        );
         return !!res;
       },
 
       async removeRemote(name: string) {
+        const url = remotes.find((r) => r.name === name)?.fetchUrl;
         const ok = await ui.confirm({
           title: `Remove remote "${name}"?`,
           message: 'Its remote-tracking branches will be removed locally. Nothing is deleted on the server.',
           confirmLabel: 'Remove',
           danger: true,
         });
-        if (ok) return run('Removing remote…', () => api.removeRemote(path, name));
+        if (!ok) return;
+        return run('Removing remote…', () => api.removeRemote(path, name), {
+          success: `Removed remote ${name}`,
+          undo: () => (url ? { label: 'Remove Remote', run: () => api.addRemote(path, name, url) } : null),
+        });
       },
 
+      // ------------------------------------------------------- in progress
       continueOp: () => run('Continuing…', () => api.continueOp(path)),
       skipOp: () => run('Skipping…', () => api.skipOp(path)),
       async abortOp() {
@@ -388,6 +787,33 @@ export function useActions() {
         if (ok) return run('Aborting…', () => api.abortOp(path), { success: 'Aborted' });
       },
 
+      // ---------------------------------------------------------- submodules
+      updateSubmodule: (subPath?: string) =>
+        run(subPath ? `Updating ${subPath}…` : 'Updating submodules…', () => api.updateSubmodule(path, subPath), {
+          success: subPath ? `Updated ${subPath}` : 'Submodules updated',
+        }),
+
+      async addSubmodule() {
+        const v = await ui.form({
+          title: 'Add Submodule',
+          fields: [
+            { name: 'url', label: 'Repository URL', placeholder: 'https://github.com/user/library.git', required: true, mono: true },
+            { name: 'path', label: 'Path in this repository', placeholder: 'vendor/library', required: true, mono: true },
+          ],
+          onChange: (name, values) => {
+            if (name !== 'url') return;
+            const m = /([^/:]+?)(\.git)?\/?$/.exec(String(values.url).trim());
+            return m ? { path: m[1] } : undefined;
+          },
+          confirmLabel: 'Add Submodule',
+        });
+        if (!v) return;
+        return run('Adding submodule…', () => api.addSubmodule(path, String(v.url).trim(), String(v.path).trim()), {
+          success: `Added submodule ${String(v.path).trim()} — commit to record it`,
+        });
+      },
+
+      // ----------------------------------------------------------- identity
       async editIdentity() {
         const id = await api.identity(path);
         const v = await ui.form({
@@ -403,9 +829,12 @@ export function useActions() {
         await run('Saving identity…', () => api.setIdentity(path, String(v.name), String(v.email), !!v.global));
         return true;
       },
+
+      showFileHistory: (filePath: string) => setView({ kind: 'file', path: filePath, mode: 'history' }),
+      blame: (filePath: string, rev?: string | null) => setView({ kind: 'file', path: filePath, mode: 'blame', rev }),
     };
     return actions;
-  }, [ui, run, path, status, refs, remotes, currentBranch]);
+  }, [ui, ctx, run, path, status, refs, remotes, setView]);
 }
 
 export type Actions = ReturnType<typeof useActions>;

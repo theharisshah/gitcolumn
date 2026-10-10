@@ -127,7 +127,13 @@ function StashDetail({ stash }: { stash: Stash }) {
       <div className="commit-diffs">
         {error && <div className="diff-note error-text">{error}</div>}
         {!diffs && !error && <div className="diff-note muted">Loading changes…</div>}
-        {diffs?.map((d) => <FileDiffSection key={d.newPath || d.oldPath} diff={d} />)}
+        {diffs?.map((d) => (
+          <FileDiffSection
+            key={d.newPath || d.oldPath}
+            diff={d}
+            images={{ before: { revs: [`${stash.ref}^1`], path: d.oldPath }, after: { revs: [stash.ref, `${stash.ref}^3`], path: d.newPath } }}
+          />
+        ))}
       </div>
     </div>
   );

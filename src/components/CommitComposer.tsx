@@ -16,7 +16,7 @@ function loadDraft(repo: string): { subject: string; body: string } {
 }
 
 export function CommitComposer({ stagedCount, totalCount }: { stagedCount: number; totalCount: number }) {
-  const { repo, status, run } = useRepo();
+  const { repo, status } = useRepo();
   const ui = useUI();
   const actions = useActions();
   const [subject, setSubject] = useState(() => loadDraft(repo.path).subject);
@@ -56,6 +56,19 @@ export function CommitComposer({ stagedCount, totalCount }: { stagedCount: numbe
       setBody((b) => (b === prefill.body ? '' : b));
     }
   }, [mergeMessage]);
+
+  // "Undo Commit" puts the message back into the composer.
+  useEffect(() => {
+    const restore = (e: Event) => {
+      const detail = (e as CustomEvent<{ repo: string; message: string }>).detail;
+      if (detail.repo !== repo.path) return;
+      const [first, ...rest] = detail.message.split('\n');
+      setSubject(first);
+      setBody(rest.join('\n').trim());
+    };
+    window.addEventListener('gitcolumn:restore-message', restore);
+    return () => window.removeEventListener('gitcolumn:restore-message', restore);
+  }, [repo.path]);
 
   useEffect(() => {
     const focus = () => subjectRef.current?.focus();
@@ -98,15 +111,7 @@ export function CommitComposer({ stagedCount, totalCount }: { stagedCount: numbe
       stageAll = true;
     }
     const message = body.trim() ? `${subject.trim()}\n\n${body.trim()}` : subject.trim();
-    const done = await run(
-      amend ? 'Amending commit…' : 'Committing…',
-      async () => {
-        if (stageAll) await api.stageAll(repo.path);
-        await api.commit(repo.path, message, amend);
-        return true;
-      },
-      { success: amend ? 'Commit amended' : `Committed “${subject.trim()}”` },
-    );
+    const done = await actions.commit(message, { amend, stageAll, undoable: !inMerge });
     if (done) {
       setSubject('');
       setBody('');

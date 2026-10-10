@@ -18,82 +18,106 @@ export interface GraphRow {
 }
 
 interface Lane {
+  /** The commit this lane is heading towards */
   hash: string;
   color: number;
 }
 
+export interface LayoutOptions {
+  /**
+   * Drop segments that lie entirely at or beyond this lane index. The renderer never shows
+   * them, and in repositories with hundreds of open lines they dominate memory.
+   */
+  maxLanes?: number;
+}
+
 /**
- * Assign each commit (in topological order, newest first) a lane and compute the
- * line segments connecting it to its children (top half) and parents (bottom half).
+ * Incremental commit graph layout. Feed commits newest-first in topological order with
+ * `append`; each call lays out only the new commits, continuing from the lane state left by
+ * the previous call, so paging through history costs O(new commits).
+ *
+ * Lanes are kept packed: when a line of history ends, the lanes to its right slide left
+ * (drawn as diagonals in the bottom half of the row), so the graph is only as wide as the
+ * number of lines that are actually open. A commit's first parent always continues in the
+ * commit's own lane, which keeps the mainline in place; new lanes (branch tips, merged
+ * branches) are added on the right so existing lanes don't shift whenever something is merged.
  */
-export function layoutGraph(commits: Commit[]): { rows: GraphRow[]; maxWidth: number } {
-  const lanes: (Lane | null)[] = [];
-  const rows: GraphRow[] = [];
-  let nextColor = 0;
-  let maxWidth = 1;
+export class GraphLayout {
+  private lanes: Lane[] = [];
+  private nextColor = 0;
+  private cap: number;
+  maxWidth = 1;
 
-  const firstFree = (from = 0) => {
-    for (let i = from; i < lanes.length; i++) if (!lanes[i]) return i;
-    return lanes.length;
-  };
-
-  for (const c of commits) {
-    const before = lanes.slice();
-    const segments: Segment[] = [];
-
-    let col = -1;
-    for (let i = 0; i < before.length; i++) {
-      if (before[i]?.hash === c.hash) {
-        if (col === -1) col = i;
-        lanes[i] = null;
-      }
-    }
-    let color: number;
-    if (col === -1) {
-      // Branch tip: no child seen yet.
-      col = firstFree();
-      color = nextColor++;
-    } else {
-      color = before[col]!.color;
-    }
-
-    const parentLanes: number[] = [];
-    c.parents.forEach((p, pi) => {
-      const existing = lanes.findIndex((l) => l?.hash === p);
-      if (existing !== -1) {
-        parentLanes.push(existing);
-      } else if (pi === 0) {
-        lanes[col] = { hash: p, color };
-        parentLanes.push(col);
-      } else {
-        const k = firstFree(col + 1);
-        lanes[k] = { hash: p, color: nextColor++ };
-        parentLanes.push(k);
-      }
-    });
-
-    // Top half: lines coming in from the row above.
-    before.forEach((l, i) => {
-      if (!l) return;
-      if (l.hash === c.hash) segments.push({ x1: i, y1: 0, x2: col, y2: 0.5, color: l.color });
-      else segments.push({ x1: i, y1: 0, x2: i, y2: 0.5, color: l.color });
-    });
-    // Bottom half: pass-through lanes, then edges from this commit to its parents.
-    lanes.forEach((l, i) => {
-      if (l && before[i] && before[i]!.hash === l.hash && before[i]!.hash !== c.hash) {
-        segments.push({ x1: i, y1: 0.5, x2: i, y2: 1, color: l.color });
-      }
-    });
-    for (const k of parentLanes) {
-      segments.push({ x1: col, y1: 0.5, x2: k, y2: 1, color: k === col ? color : lanes[k]!.color });
-    }
-
-    while (lanes.length && !lanes[lanes.length - 1]) lanes.pop();
-    const width = Math.max(before.length, lanes.length, col + 1);
-    maxWidth = Math.max(maxWidth, width);
-    rows.push({ col, color, segments, width, isMerge: c.parents.length > 1 });
+  constructor(opts: LayoutOptions = {}) {
+    this.cap = opts.maxLanes ?? Infinity;
   }
-  return { rows, maxWidth };
+
+  append(commits: Commit[]): GraphRow[] {
+    const rows: GraphRow[] = [];
+    const cap = this.cap;
+    for (const c of commits) {
+      const before = this.lanes;
+      const segments: Segment[] = [];
+      const add = (x1: number, y1: number, x2: number, y2: number, color: number) => {
+        if (x1 < cap || x2 < cap) segments.push({ x1, y1, x2, y2, color });
+      };
+
+      // Every lane heading for this commit converges into its node; the node sits in the first one.
+      let col = before.findIndex((l) => l.hash === c.hash);
+      const isTip = col === -1;
+      if (isTip) col = before.length;
+      const color = isTip ? this.nextColor++ : before[col].color;
+
+      before.forEach((l, i) => add(i, 0, l.hash === c.hash ? col : i, 0.5, l.color));
+
+      // Lanes for the next row. `from` is the lane's x at the node line, or 'node' if it starts here.
+      const next: { lane: Lane; from: number | 'node' }[] = [];
+      const joins: string[] = [];
+      const [first, ...others] = c.parents;
+      // A lane to the right that already heads for the first parent is folded into this commit's
+      // lane, so the first-parent chain keeps its column. One to the left absorbs this lane instead.
+      const firstAt = first === undefined ? -1 : before.findIndex((l) => l.hash === first);
+      const firstJoinsLeft = firstAt !== -1 && firstAt < col;
+      for (let i = 0; i <= before.length; i++) {
+        if (i === col && first !== undefined) {
+          if (firstJoinsLeft) joins.push(first);
+          else next.push({ lane: { hash: first, color }, from: 'node' });
+        }
+        const l = before[i];
+        if (!l || l.hash === c.hash) continue;
+        if (i === firstAt && !firstJoinsLeft) {
+          // Folded into the first parent's lane: draw it sliding over to where that lane continues.
+          const target = next.findIndex((n) => n.lane.hash === first);
+          add(i, 0.5, target, 1, l.color);
+          continue;
+        }
+        next.push({ lane: l, from: i });
+      }
+      for (const p of others) {
+        if (next.some((n) => n.lane.hash === p)) joins.push(p);
+        else next.push({ lane: { hash: p, color: this.nextColor++ }, from: 'node' });
+      }
+
+      next.forEach((n, j) => add(n.from === 'node' ? col : n.from, 0.5, j, 1, n.lane.color));
+      for (const p of joins) {
+        const j = next.findIndex((n) => n.lane.hash === p);
+        add(col, 0.5, j, 1, next[j].lane.color);
+      }
+
+      this.lanes = next.map((n) => n.lane);
+      const width = Math.max(before.length, this.lanes.length, col + 1);
+      this.maxWidth = Math.max(this.maxWidth, width);
+      rows.push({ col, color, segments, width, isMerge: c.parents.length > 1 });
+    }
+    return rows;
+  }
+}
+
+/** Lay out a complete list of commits (newest first, topological order). */
+export function layoutGraph(commits: Commit[], opts?: LayoutOptions): { rows: GraphRow[]; maxWidth: number } {
+  const layout = new GraphLayout(opts);
+  const rows = layout.append(commits);
+  return { rows, maxWidth: layout.maxWidth };
 }
 
 export const LANE_COLORS = 8;

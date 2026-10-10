@@ -1,31 +1,138 @@
 {
   "name": "gitcolumn",
   "productName": "GitColumn",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "private": true,
   "description": "A Tower-style desktop Git client",
+  "author": "GitColumn",
   "type": "module",
   "main": "dist-electron/main.cjs",
+  "desktopName": "gitcolumn.desktop",
   "scripts": {
     "dev": "node scripts/dev.mjs",
     "web": "vite",
     "build": "tsc --noEmit && vite build && node scripts/build-electron.mjs",
     "start": "npm run build && electron .",
     "typecheck": "tsc --noEmit",
-    "test": "node scripts/test.mjs"
+    "test": "node scripts/test.mjs",
+    "icons": "node scripts/icons.mjs",
+    "dist": "npm run build && node scripts/dist.mjs",
+    "dist:mac": "npm run build && node scripts/dist.mjs --mac",
+    "dist:win": "npm run build && node scripts/dist.mjs --win",
+    "dist:linux": "npm run build && node scripts/dist.mjs --linux"
   },
-  "dependencies": {
-    "lucide-react": "^1.55.0",
-    "react": "^19.3.0",
-    "react-dom": "^19.3.0"
+  "build": {
+    "appId": "app.gitcolumn.desktop",
+    "productName": "GitColumn",
+    "copyright": "Copyright © 2026 GitColumn",
+    "artifactName": "${productName}-${version}-${arch}.${ext}",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*",
+      "package.json"
+    ],
+    "asar": true,
+    "npmRebuild": false,
+    "electronLanguages": [
+      "en"
+    ],
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "icon": "build/icon.icns",
+      "darkModeSupport": true,
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        }
+      ]
+    },
+    "dmg": {
+      "title": "GitColumn ${version}",
+      "window": {
+        "width": 540,
+        "height": 380
+      },
+      "contents": [
+        {
+          "x": 140,
+          "y": 190
+        },
+        {
+          "x": 400,
+          "y": 190,
+          "type": "link",
+          "path": "/Applications"
+        }
+      ]
+    },
+    "win": {
+      "icon": "build/icon.ico",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "artifactName": "${productName}-Setup-${version}-${arch}.${ext}"
+    },
+    "linux": {
+      "icon": "build/icons",
+      "category": "Development",
+      "maintainer": "GitColumn",
+      "target": [
+        {
+          "target": "AppImage",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        },
+        {
+          "target": "deb",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
+      ],
+      "syncDesktopName": true
+    }
   },
   "devDependencies": {
+    "@resvg/resvg-js": "^2.6.2",
     "@types/node": "^26.6.5",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^6.1.2",
     "electron": "^44.7.0",
+    "electron-builder": "^26.15.3",
     "esbuild": "^0.28.2",
+    "highlight.js": "^11.12.0",
+    "lucide-react": "^1.55.0",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
     "typescript": "^7.0.2",
     "vite": "^8.3.4"
   }

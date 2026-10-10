@@ -1,4 +1,20 @@
-import type { ChangedFile, Commit, DiffLine, FileDiff, FileStatus, Hunk, Ref, Remote, Stash, StatusCode } from '../shared/types.ts';
+import type {
+  Blame,
+  BlameCommit,
+  ChangedFile,
+  Commit,
+  DiffLine,
+  FileCommit,
+  FileDiff,
+  FileStatus,
+  Hunk,
+  LfsFile,
+  Ref,
+  Remote,
+  Stash,
+  StatusCode,
+  Submodule,
+} from '../shared/types.ts';
 
 export const FS = '\x1f'; // field separator used in --format strings
 export const RS = '\x1e'; // record separator used in --format strings
@@ -371,4 +387,152 @@ function stripPrefix(p: string): string | null {
   p = p.replace(/\t$/, '');
   if (p.startsWith('"') && p.endsWith('"')) p = p.slice(1, -1);
   return p.replace(/^[ab]\//, '');
+}
+
+// ---------------------------------------------------------------------------
+// git log --follow --name-status (file history)
+// ---------------------------------------------------------------------------
+
+export const FILE_LOG_FORMAT = '%x1e' + ['%H', '%P', '%an', '%ae', '%at', '%s'].join('%x1f');
+
+export function parseFileLog(raw: string, requested: string): FileCommit[] {
+  const commits: FileCommit[] = [];
+  for (const rec of raw.split(RS)) {
+    if (!rec.trim()) continue;
+    const nl = rec.indexOf('\n');
+    const header = nl === -1 ? rec : rec.slice(0, nl);
+    const rest = nl === -1 ? '' : rec.slice(nl + 1);
+    const [hash, parents, author, email, date, subject] = header.split(FS);
+    let path = requested;
+    let oldPath: string | undefined;
+    let status: StatusCode = 'M';
+    const line = rest.split('\n').find((l) => /^[A-Z]\d*\t/.test(l));
+    if (line) {
+      const parts = line.split('\t');
+      status = parts[0][0] as StatusCode;
+      if ((status === 'R' || status === 'C') && parts.length >= 3) {
+        oldPath = parts[1];
+        path = parts[2];
+      } else path = parts[1];
+    }
+    commits.push({
+      hash,
+      parents: parents ? parents.split(' ') : [],
+      author,
+      email,
+      date: Number(date),
+      subject: subject ?? '',
+      path,
+      oldPath,
+      status,
+    });
+  }
+  return commits;
+}
+
+// ---------------------------------------------------------------------------
+// git blame --porcelain
+// ---------------------------------------------------------------------------
+
+const BLAME_HEADER = /^([0-9a-f]{40,64}) (\d+) (\d+)(?: \d+)?$/;
+
+export function parseBlame(raw: string, path: string, rev: string | null): Blame {
+  const commits: Record<string, BlameCommit> = {};
+  const lines: Blame['lines'] = [];
+  let current: { hash: string; orig: number; final: number } | null = null;
+  for (const line of raw.split('\n')) {
+    if (current && line.startsWith('\t')) {
+      lines.push({ hash: current.hash, line: current.final, origLine: current.orig, content: line.slice(1) });
+      current = null;
+      continue;
+    }
+    const m = BLAME_HEADER.exec(line);
+    if (m) {
+      current = { hash: m[1], orig: Number(m[2]), final: Number(m[3]) };
+      if (!commits[m[1]]) {
+        commits[m[1]] = {
+          hash: m[1],
+          author: '',
+          email: '',
+          time: 0,
+          summary: '',
+          uncommitted: /^0+$/.test(m[1]),
+        };
+      }
+      continue;
+    }
+    if (!current) continue;
+    const c = commits[current.hash];
+    const sp = line.indexOf(' ');
+    const key = sp === -1 ? line : line.slice(0, sp);
+    const value = sp === -1 ? '' : line.slice(sp + 1);
+    if (key === 'author') c.author = value;
+    else if (key === 'author-mail') c.email = value.replace(/^<|>$/g, '');
+    else if (key === 'author-time') c.time = Number(value);
+    else if (key === 'summary') c.summary = value;
+    else if (key === 'previous') {
+      const i = value.indexOf(' ');
+      c.previous = { hash: value.slice(0, i), path: value.slice(i + 1) };
+    }
+  }
+  return { path, rev, commits, lines };
+}
+
+// ---------------------------------------------------------------------------
+// Submodules: .gitmodules config + git submodule status
+// ---------------------------------------------------------------------------
+
+export function parseSubmodules(config: string, status: string): Submodule[] {
+  const byName = new Map<string, Partial<Submodule>>();
+  for (const line of config.split('\n')) {
+    const m = /^submodule\.(.+)\.(path|url|branch) (.*)$/.exec(line);
+    if (!m) continue;
+    const entry = byName.get(m[1]) ?? { name: m[1] };
+    entry[m[2] as 'path' | 'url' | 'branch'] = m[3];
+    byName.set(m[1], entry);
+  }
+  const states = new Map<string, { hash: string; state: Submodule['state']; describe?: string }>();
+  for (const line of status.split('\n')) {
+    const m = /^([ +\-U])([0-9a-f]+) (.+?)(?: \((.*)\))?$/.exec(line);
+    if (!m) continue;
+    const state = m[1] === '-' ? 'uninitialized' : m[1] === '+' ? 'modified' : m[1] === 'U' ? 'conflict' : 'ok';
+    states.set(m[3], { hash: m[2], state, describe: m[4] });
+  }
+  return [...byName.values()]
+    .filter((e): e is Partial<Submodule> & { path: string } => !!e.path)
+    .map((e) => {
+      const st = states.get(e.path);
+      return {
+        name: e.name!,
+        path: e.path,
+        url: e.url ?? '',
+        branch: e.branch,
+        hash: st?.hash ?? '',
+        state: st?.state ?? 'uninitialized',
+        describe: st?.describe,
+      };
+    })
+    .sort((a, b) => a.path.localeCompare(b.path));
+}
+
+// ---------------------------------------------------------------------------
+// Git LFS
+// ---------------------------------------------------------------------------
+
+/** Patterns in a .gitattributes file that route through the LFS filter. */
+export function parseLfsPatterns(gitattributes: string): string[] {
+  return gitattributes
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => l && !l.startsWith('#') && /\sfilter=lfs(\s|$)/.test(l))
+    .map((l) => l.split(/\s+/)[0]);
+}
+
+/** git lfs ls-files --long: "<oid> <*|-> <path>" */
+export function parseLfsFiles(raw: string): LfsFile[] {
+  return raw
+    .split('\n')
+    .map((l) => /^([0-9a-f]+) ([*-]) (.+)$/.exec(l))
+    .filter((m): m is RegExpExecArray => !!m)
+    .map((m) => ({ oid: m[1], downloaded: m[2] === '*', path: m[3] }));
 }

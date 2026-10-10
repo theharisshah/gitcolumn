@@ -162,3 +162,118 @@ export interface ApiResult<T = unknown> {
   data?: T;
   error?: string;
 }
+
+// ------------------------------------------------------------ file history
+
+export interface FileCommit extends Commit {
+  /** Path of the file in this commit (differs from the requested path after renames) */
+  path: string;
+  /** Previous path when this commit renamed the file */
+  oldPath?: string;
+  status: StatusCode;
+}
+
+export interface BlameCommit {
+  hash: string;
+  author: string;
+  email: string;
+  time: number;
+  summary: string;
+  /** Commit and path to continue blaming from ("blame previous revision") */
+  previous?: { hash: string; path: string };
+  uncommitted: boolean;
+}
+
+export interface BlameLine {
+  hash: string;
+  line: number;
+  origLine: number;
+  content: string;
+}
+
+export interface Blame {
+  path: string;
+  rev: string | null;
+  commits: Record<string, BlameCommit>;
+  lines: BlameLine[];
+}
+
+/** Where to read a file version from: a revision (`HEAD`, `<sha>`), ':' for the index, or null for the working tree. */
+export interface BlobSpec {
+  revs: (string | null)[];
+  path: string;
+}
+
+export interface Blob {
+  dataUrl: string;
+  size: number;
+}
+
+// -------------------------------------------------------------- submodules
+
+export interface Submodule {
+  name: string;
+  path: string;
+  url: string;
+  branch?: string;
+  hash: string;
+  /** ok | uninitialized | modified (checked-out commit differs from the recorded one) | conflict */
+  state: 'ok' | 'uninitialized' | 'modified' | 'conflict';
+  describe?: string;
+}
+
+// --------------------------------------------------------------------- LFS
+
+export interface LfsStatus {
+  installed: boolean;
+  version?: string;
+  /** Patterns from .gitattributes that use filter=lfs */
+  patterns: string[];
+}
+
+export interface LfsFile {
+  oid: string;
+  path: string;
+  /** Object content is present locally (vs. pointer only) */
+  downloaded: boolean;
+}
+
+// --------------------------------------------------------- interactive rebase
+
+export type RebaseAction = 'pick' | 'reword' | 'edit' | 'squash' | 'fixup' | 'drop';
+
+export interface RebaseStep {
+  action: RebaseAction;
+  hash: string;
+  /** New message for 'reword' */
+  message?: string;
+}
+
+export interface RebasePlanCommit extends Commit {
+  body: string;
+  pushed: boolean;
+}
+
+export interface RebasePlan {
+  base: string | null;
+  commits: RebasePlanCommit[];
+  hasMerges: boolean;
+}
+
+// -------------------------------------------------------------------- undo
+
+export interface FileSnapshot {
+  path: string;
+  /** Blob with the file's working tree content, or null if the file did not exist */
+  blob: string | null;
+  /** Permission bits to restore */
+  mode?: number;
+}
+
+export interface Snapshot {
+  head: string | null;
+  branch: string | null;
+  /** Tree object of the index, or null when the index has conflicts */
+  index: string | null;
+  files?: FileSnapshot[];
+}

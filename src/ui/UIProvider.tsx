@@ -22,7 +22,7 @@ export interface FieldOption {
 export interface Field {
   name: string;
   label?: string;
-  type?: 'text' | 'textarea' | 'checkbox' | 'select' | 'radio';
+  type?: 'text' | 'password' | 'textarea' | 'checkbox' | 'select' | 'radio';
   value?: string | boolean;
   placeholder?: string;
   options?: FieldOption[];
@@ -54,18 +54,26 @@ export type MenuItem =
 
 export type ToastKind = 'success' | 'error' | 'info' | 'warning';
 
+export interface ToastAction {
+  label: string;
+  onClick: () => void;
+}
+
 export interface Toast {
   id: number;
   kind: ToastKind;
   title: string;
   message?: string;
+  action?: ToastAction;
 }
 
 interface UI {
   form(spec: FormSpec): Promise<FormValues | null>;
   confirm(spec: { title: string; message?: ReactNode; confirmLabel?: string; danger?: boolean }): Promise<boolean>;
   menu(e: { clientX: number; clientY: number; preventDefault?: () => void }, items: MenuItem[]): void;
-  toast(kind: ToastKind, title: string, message?: string): void;
+  toast(kind: ToastKind, title: string, message?: string, action?: ToastAction): void;
+  /** Show arbitrary modal content; resolves with the value passed to `close`. */
+  modal<T>(render: (close: (value: T | null) => void) => ReactNode): Promise<T | null>;
 }
 
 const UIContext = createContext<UI | null>(null);
@@ -88,6 +96,7 @@ export function UIProvider({ children }: { children: ReactNode }) {
   const [dialog, setDialog] = useState<DialogState | null>(null);
   const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null);
   const [toasts, setToasts] = useState<Toast[]>([]);
+  const [custom, setCustom] = useState<{ id: number; node: ReactNode } | null>(null);
   const nextId = useRef(1);
 
   const dismissToast = useCallback((id: number) => setToasts((t) => t.filter((x) => x.id !== id)), []);
@@ -107,12 +116,21 @@ export function UIProvider({ children }: { children: ReactNode }) {
         e.preventDefault?.();
         setMenu({ x: e.clientX, y: e.clientY, items });
       },
-      toast: (kind, title, message) => {
+      toast: (kind, title, message, action) => {
         const id = nextId.current++;
-        setToasts((t) => [...t.slice(-4), { id, kind, title, message }]);
-        const ttl = kind === 'error' ? 12000 : kind === 'warning' ? 8000 : 4000;
+        setToasts((t) => [...t.slice(-4), { id, kind, title, message, action }]);
+        const ttl = kind === 'error' ? 12000 : kind === 'warning' ? 8000 : action ? 7000 : 4000;
         setTimeout(() => dismissToast(id), ttl);
       },
+      modal: <T,>(render: (close: (value: T | null) => void) => ReactNode) =>
+        new Promise<T | null>((resolve) => {
+          const id = nextId.current++;
+          const close = (value: T | null) => {
+            setCustom((c) => (c?.id === id ? null : c));
+            resolve(value);
+          };
+          setCustom({ id, node: render(close) });
+        }),
     }),
     [dismissToast],
   );
@@ -130,6 +148,11 @@ export function UIProvider({ children }: { children: ReactNode }) {
           }}
         />
       )}
+      {custom && (
+        <div key={custom.id} className="modal-backdrop">
+          {custom.node}
+        </div>
+      )}
       {menu && <ContextMenu {...menu} onClose={() => setMenu(null)} />}
       <div className="toasts">
         {toasts.map((t) => (
@@ -141,6 +164,17 @@ export function UIProvider({ children }: { children: ReactNode }) {
               <div className="toast-title">{t.title}</div>
               {t.message && <pre className="toast-message">{t.message}</pre>}
             </div>
+            {t.action && (
+              <button
+                className="button button-small toast-action"
+                onClick={() => {
+                  dismissToast(t.id);
+                  t.action!.onClick();
+                }}
+              >
+                {t.action.label}
+              </button>
+            )}
             <button className="icon-button toast-close" onClick={() => dismissToast(t.id)} aria-label="Dismiss">
               <X size={14} />
             </button>
@@ -291,6 +325,7 @@ function FieldInput({
         ) : (
           <input
             className={`input ${f.mono ? 'mono' : ''}`}
+            type={f.type === 'password' ? 'password' : 'text'}
             value={String(value ?? '')}
             placeholder={f.placeholder}
             spellCheck={false}

@@ -37,10 +37,17 @@ export function refsByHash(refs: Ref[], head: string | null, detached: boolean):
   return map;
 }
 
+/** Approximate rendered width of a badge: border + padding + icon + gap + label (+ synced icon). */
+function badgeWidth(b: BadgeRef): number {
+  return 2 + 12 + 10 + 3 + Math.ceil(b.label.length * 6.4) + (b.synced ? 13 : 0);
+}
+
 export function RefBadges({ badges, onContextMenu }: { badges?: BadgeRef[]; onContextMenu?: (e: React.MouseEvent, b: BadgeRef) => void }) {
   if (!badges?.length) return null;
+  // When the row is tight the strip shrinks, but never below the first badge (up to 64px).
+  const minWidth = Math.min(64, badgeWidth(badges[0]));
   return (
-    <span className="ref-badges">
+    <span className="ref-badges" style={{ minWidth }}>
       {badges.map((b) => (
         <span
           key={b.key}

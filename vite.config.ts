@@ -24,5 +24,6 @@ export default defineConfig({
     },
   ],
   server: { host: '127.0.0.1', port: 5199, strictPort: true },
-  build: { outDir: 'dist', emptyOutDir: true },
+  // highlight.js's common language bundle is large but loads from disk in the desktop app.
+  build: { outDir: 'dist', emptyOutDir: true, chunkSizeWarningLimit: 1500 },
 });

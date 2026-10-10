@@ -4,25 +4,42 @@ import os from 'node:os';
 import path from 'node:path';
 import type {
   AppInfo,
+  Blame,
+  Blob,
+  BlobSpec,
   ChangedFile,
   Commit,
   CommitDetail,
+  FileCommit,
   FileDiff,
+  FileSnapshot,
   FileStatus,
+  LfsFile,
+  LfsStatus,
   LineSelection,
   PatchAction,
+  RebasePlan,
+  RebasePlanCommit,
+  RebaseStep,
   Ref,
   Remote,
   RepoInfo,
   RepoState,
+  Snapshot,
   Stash,
   Status,
+  Submodule,
 } from '../shared/types.ts';
-import { git, GitError } from './git.ts';
+import { git, GitError, gitRaw } from './git.ts';
 import {
+  FILE_LOG_FORMAT,
   FS,
   LOG_FORMAT,
+  parseBlame,
   parseDiff,
+  parseFileLog,
+  parseLfsFiles,
+  parseLfsPatterns,
   parseLog,
   parseNameStatus,
   parseNumstat,
@@ -30,7 +47,9 @@ import {
   parseRemotes,
   parseStashes,
   parseStatus,
+  parseSubmodules,
   REF_FORMAT,
+  RS,
 } from './parse.ts';
 import { buildPatch } from './patch.ts';
 
@@ -268,7 +287,7 @@ export function createApi(host: Host): Record<string, Handler> {
       };
     },
 
-    async 'commit.diff'({ repo, hash, parent }: { repo: string; hash: string; parent?: string }): Promise<FileDiff[]> {
+    async 'commit.diff'({ repo, hash, parent, paths }: { repo: string; hash: string; parent?: string; paths?: string[] }): Promise<FileDiff[]> {
       assertSafe(hash);
       let args: string[];
       if (parent) {
@@ -277,6 +296,7 @@ export function createApi(host: Host): Record<string, Handler> {
       } else {
         args = ['diff-tree', '-p', '-r', '--root', '--no-commit-id', '--no-ext-diff', '-M', hash];
       }
+      if (paths?.length) args.push('--', ...paths);
       return parseDiff(await git(repo, args, { maxBytes: MAX_DIFF_BYTES }));
     },
 
@@ -512,9 +532,9 @@ export function createApi(host: Host): Record<string, Handler> {
       return withConflicts(repo, () => git(repo, args));
     },
 
-    async reset({ repo, hash, mode }: { repo: string; hash: string; mode: 'soft' | 'mixed' | 'hard' }) {
+    async reset({ repo, hash, mode }: { repo: string; hash: string; mode: 'soft' | 'mixed' | 'hard' | 'keep' }) {
       assertSafe(hash);
-      if (!['soft', 'mixed', 'hard'].includes(mode)) throw new Error(`Invalid reset mode: ${mode}`);
+      if (!['soft', 'mixed', 'hard', 'keep'].includes(mode)) throw new Error(`Invalid reset mode: ${mode}`);
       await git(repo, ['reset', `--${mode}`, hash]);
     },
 
@@ -542,12 +562,14 @@ export function createApi(host: Host): Record<string, Handler> {
     },
 
     // ------------------------------------------------------------- remotes
-    async fetch({ repo, remote }: { repo: string; remote?: string }) {
+    async fetch({ repo, remote, quiet }: { repo: string; remote?: string; quiet?: boolean }) {
+      // Background fetches must never pop up credential prompts: an empty GIT_ASKPASS disables them.
+      const env = quiet ? { GIT_ASKPASS: '', SSH_ASKPASS_REQUIRE: 'never' } : undefined;
       if (remote) {
         assertSafe(remote);
-        await git(repo, ['fetch', '--prune', '--tags', remote], { timeout: NETWORK_TIMEOUT });
+        await git(repo, ['fetch', '--prune', '--tags', remote], { timeout: NETWORK_TIMEOUT, env });
       } else {
-        await git(repo, ['fetch', '--all', '--prune', '--tags'], { timeout: NETWORK_TIMEOUT });
+        await git(repo, ['fetch', '--all', '--prune', '--tags'], { timeout: NETWORK_TIMEOUT, env });
       }
     },
 
@@ -686,6 +708,285 @@ export function createApi(host: Host): Record<string, Handler> {
       await git(repo, ['config', ...scope, 'user.email', email]);
     },
 
+    // -------------------------------------------------------- file history
+    async 'file.history'({ repo, path: p, skip = 0, limit = 300 }: { repo: string; path: string; skip?: number; limit?: number }): Promise<FileCommit[]> {
+      if (!(await headExists(repo))) return [];
+      const raw = await git(repo, [
+        'log',
+        '--follow',
+        '-M',
+        '--name-status',
+        `--format=${FILE_LOG_FORMAT}`,
+        `--skip=${skip}`,
+        `--max-count=${limit}`,
+        'HEAD',
+        '--',
+        p,
+      ]);
+      return parseFileLog(raw, p);
+    },
+
+    async blame({ repo, path: p, rev }: { repo: string; path: string; rev?: string | null }): Promise<Blame> {
+      const args = ['blame', '--porcelain'];
+      if (rev) {
+        assertSafe(rev);
+        args.push(rev);
+      }
+      args.push('--', p);
+      return parseBlame(await git(repo, args, { maxBytes: MAX_DIFF_BYTES }), p, rev ?? null);
+    },
+
+    /** Read a file version as a data URL (used for image diffs). Tries each revision in order. */
+    async 'file.blob'({ repo, revs, path: p }: BlobSpec & { repo: string }): Promise<Blob | null> {
+      const max = 15 * 1024 * 1024;
+      for (const rev of revs) {
+        try {
+          let data: Buffer;
+          if (rev === null) {
+            const abs = insideRepo(repo, p);
+            if ((await fs.stat(abs)).size > max) continue;
+            data = await fs.readFile(abs);
+          } else {
+            if (rev !== ':') assertSafe(rev);
+            const spec = rev === ':' ? `:${p}` : `${rev}:${p}`;
+            const size = Number((await git(repo, ['cat-file', '-s', spec])).trim());
+            if (size > max) continue;
+            data = await gitRaw(repo, ['cat-file', 'blob', spec]);
+          }
+          return { dataUrl: `data:${mimeType(p)};base64,${data.toString('base64')}`, size: data.length };
+        } catch {
+          /* try the next revision */
+        }
+      }
+      return null;
+    },
+
+    async 'gitignore.write'({ repo, content }: { repo: string; content: string }) {
+      await fs.writeFile(path.join(repo, '.gitignore'), content.endsWith('\n') || !content ? content : content + '\n');
+    },
+
+    // ---------------------------------------------------- interactive rebase
+    async 'rebase.plan'({ repo, base }: { repo: string; base: string | null }): Promise<RebasePlan> {
+      if (base) {
+        assertSafe(base);
+        try {
+          await git(repo, ['merge-base', '--is-ancestor', base, 'HEAD']);
+        } catch {
+          throw new Error('That commit is not part of the current branch.');
+        }
+      }
+      const range = base ? `${base}..HEAD` : 'HEAD';
+      const fmt = ['%H', '%P', '%an', '%ae', '%at', '%s', '%b'].join('%x1f') + '%x1e';
+      const [raw, unpushedRaw, baseHash] = await Promise.all([
+        git(repo, ['log', '--reverse', '--topo-order', `--format=${fmt}`, range, '--']),
+        git(repo, ['rev-list', range, '--not', '--remotes']),
+        base ? git(repo, ['rev-parse', '--verify', `${base}^{commit}`]).then((h) => h.trim()) : Promise.resolve(null),
+      ]);
+      const unpushed = new Set(unpushedRaw.split('\n').filter(Boolean));
+      const commits: RebasePlanCommit[] = raw
+        .split(RS)
+        .map((r) => r.replace(/^\n/, ''))
+        .filter(Boolean)
+        .map((r) => {
+          const [hash, parents, author, email, date, subject, ...body] = r.split(FS);
+          return {
+            hash,
+            parents: parents ? parents.split(' ') : [],
+            author,
+            email,
+            date: Number(date),
+            subject: subject ?? '',
+            body: body.join(FS).trim(),
+            pushed: !unpushed.has(hash),
+          };
+        });
+      return { base: baseHash, commits, hasMerges: commits.some((c) => c.parents.length > 1) };
+    },
+
+    async 'rebase.interactive'({ repo, base, steps }: { repo: string; base: string | null; steps: RebaseStep[] }) {
+      const actions = ['pick', 'reword', 'edit', 'squash', 'fixup', 'drop'];
+      for (const s of steps) {
+        if (!actions.includes(s.action)) throw new Error(`Invalid rebase action: ${s.action}`);
+        if (!/^[0-9a-f]{7,64}$/.test(s.hash)) throw new Error(`Invalid commit: ${s.hash}`);
+      }
+      const firstKept = steps.find((s) => s.action !== 'drop');
+      if (!firstKept) throw new Error('At least one commit must be kept.');
+      if (firstKept.action === 'squash' || firstKept.action === 'fixup') {
+        throw new Error('The first commit can’t be squashed — there is no earlier commit in the range to combine it with.');
+      }
+      const plan = (await api['rebase.plan']({ repo, base })) as RebasePlan;
+      if (plan.hasMerges) {
+        throw new Error('This range contains merge commits, which interactive rebase would flatten. Start from a more recent commit.');
+      }
+      const planned = new Set(plan.commits.map((c) => c.hash));
+      if (steps.length !== plan.commits.length || !steps.every((s) => planned.has(s.hash))) {
+        throw new Error('The branch changed since the rebase was planned. Please try again.');
+      }
+      const unchanged = steps.every((s, i) => s.action === 'pick' && s.hash === plan.commits[i].hash);
+      if (unchanged) return { conflicts: false, paused: false };
+
+      // Message files must outlive this call: exec lines run later if the rebase stops.
+      const dir = path.join(await gitDir(repo), 'gitcolumn-rebase');
+      await fs.rm(dir, { recursive: true, force: true });
+      await fs.mkdir(dir, { recursive: true });
+      const todo: string[] = [];
+      for (const [i, s] of steps.entries()) {
+        if (s.action === 'reword' && s.message?.trim()) {
+          const msgFile = path.join(dir, `message-${i}.txt`);
+          await fs.writeFile(msgFile, s.message.trim() + '\n');
+          todo.push(`pick ${s.hash}`);
+          todo.push(`exec git commit --amend --allow-empty --quiet --cleanup=whitespace -F ${shellQuote(msgFile)}`);
+        } else {
+          todo.push(`${s.action === 'reword' ? 'pick' : s.action} ${s.hash}`);
+        }
+      }
+      const todoFile = path.join(dir, 'todo');
+      await fs.writeFile(todoFile, todo.join('\n') + '\n');
+      const result = await withConflicts(repo, () =>
+        git(repo, ['rebase', '-i', '--autostash', base ?? '--root'], { env: { GIT_SEQUENCE_EDITOR: `cp ${shellQuote(todoFile)}` } }),
+      );
+      const state = await repoState(repo);
+      return { ...result, paused: !result.conflicts && state.rebasing };
+    },
+
+    // ------------------------------------------------------------ snapshots
+    /** Capture HEAD, the index and (optionally) working tree files so an operation can be undone. */
+    async 'snapshot.capture'({ repo, paths }: { repo: string; paths?: string[] }): Promise<Snapshot> {
+      const [head, branch, index] = await Promise.all([
+        git(repo, ['rev-parse', '--verify', '-q', 'HEAD']).then((s) => s.trim() || null, () => null),
+        git(repo, ['symbolic-ref', '-q', '--short', 'HEAD']).then((s) => s.trim() || null, () => null),
+        git(repo, ['write-tree']).then((s) => s.trim() || null, () => null),
+      ]);
+      const snapshot: Snapshot = { head, branch, index };
+      if (paths?.length) {
+        const files: FileSnapshot[] = [];
+        const existing: { path: string; mode: number }[] = [];
+        for (const p of [...new Set(paths)]) {
+          let st: import('node:fs').Stats | null = null;
+          try {
+            st = await fs.lstat(insideRepo(repo, p));
+          } catch {
+            st = null;
+          }
+          if (!st) files.push({ path: p, blob: null });
+          else if (st.isFile()) existing.push({ path: p, mode: st.mode & 0o777 });
+          // symlinks, directories and submodules are left out of the snapshot
+        }
+        if (existing.length) {
+          const out = await git(repo, ['hash-object', '-w', '--no-filters', '--stdin-paths'], {
+            input: existing.map((e) => e.path).join('\n') + '\n',
+          });
+          const hashes = out.trim().split('\n');
+          existing.forEach((e, i) => files.push({ path: e.path, blob: hashes[i], mode: e.mode }));
+        }
+        snapshot.files = files;
+      }
+      return snapshot;
+    },
+
+    async 'snapshot.restore'({ repo, snapshot, index = true }: { repo: string; snapshot: Snapshot; index?: boolean }) {
+      for (const f of snapshot.files ?? []) {
+        const abs = insideRepo(repo, f.path);
+        if (f.blob) {
+          assertHash(f.blob);
+          const data = await gitRaw(repo, ['cat-file', 'blob', f.blob]);
+          await fs.mkdir(path.dirname(abs), { recursive: true });
+          await fs.writeFile(abs, data);
+          if (f.mode) await fs.chmod(abs, f.mode);
+        } else {
+          await fs.rm(abs, { force: true });
+        }
+      }
+      if (index && snapshot.index) {
+        assertHash(snapshot.index);
+        await git(repo, ['read-tree', snapshot.index]);
+      }
+    },
+
+    async 'rev.parse'({ repo, rev }: { repo: string; rev: string }): Promise<string | null> {
+      assertSafe(rev);
+      return git(repo, ['rev-parse', '--verify', '-q', rev]).then((s) => s.trim() || null, () => null);
+    },
+
+    async 'ref.update'({ repo, ref, hash }: { repo: string; ref: string; hash: string }) {
+      assertRef(ref);
+      assertHash(hash);
+      await git(repo, ['update-ref', ref, hash]);
+    },
+
+    async 'ref.delete'({ repo, ref }: { repo: string; ref: string }) {
+      assertRef(ref);
+      await git(repo, ['update-ref', '-d', ref]);
+    },
+
+    async 'stash.store'({ repo, hash, message }: { repo: string; hash: string; message: string }) {
+      assertHash(hash);
+      await git(repo, ['stash', 'store', '-m', message, hash]);
+    },
+
+    // ------------------------------------------------------------ submodules
+    async submodules({ repo }: { repo: string }): Promise<Submodule[]> {
+      if (!existsSync(path.join(repo, '.gitmodules'))) return [];
+      const [config, status] = await Promise.all([
+        git(repo, ['config', '-f', '.gitmodules', '--get-regexp', '^submodule\\..*\\.(path|url|branch)$'], { okCodes: [1] }),
+        git(repo, ['submodule', 'status']).catch(() => ''),
+      ]);
+      return parseSubmodules(config, status);
+    },
+
+    async 'submodule.update'({ repo, path: p }: { repo: string; path?: string }) {
+      const args = ['submodule', 'update', '--init', '--recursive'];
+      if (p) args.push('--', p);
+      await git(repo, args, { timeout: NETWORK_TIMEOUT });
+    },
+
+    async 'submodule.add'({ repo, url, path: p }: { repo: string; url: string; path: string }) {
+      assertSafe(url);
+      insideRepo(repo, p);
+      await git(repo, ['submodule', 'add', '--', url, p], { timeout: NETWORK_TIMEOUT });
+    },
+
+    async 'submodule.sync'({ repo }: { repo: string }) {
+      await git(repo, ['submodule', 'sync', '--recursive']);
+    },
+
+    // ------------------------------------------------------------------ LFS
+    async 'lfs.status'({ repo }: { repo: string }): Promise<LfsStatus> {
+      const [version, attrs] = await Promise.all([
+        git(repo, ['lfs', 'version']).then((v) => v.trim(), () => null),
+        readText(path.join(repo, '.gitattributes')),
+      ]);
+      return { installed: !!version, version: version ?? undefined, patterns: parseLfsPatterns(attrs ?? '') };
+    },
+
+    async 'lfs.files'({ repo }: { repo: string }): Promise<LfsFile[]> {
+      return parseLfsFiles(await git(repo, ['lfs', 'ls-files', '--long']));
+    },
+
+    async 'lfs.install'({ repo }: { repo: string }) {
+      await git(repo, ['lfs', 'install', '--local']);
+    },
+
+    async 'lfs.track'({ repo, pattern }: { repo: string; pattern: string }) {
+      assertSafe(pattern);
+      await git(repo, ['lfs', 'track', pattern]);
+    },
+
+    async 'lfs.untrack'({ repo, pattern }: { repo: string; pattern: string }) {
+      assertSafe(pattern);
+      await git(repo, ['lfs', 'untrack', pattern]);
+    },
+
+    async 'lfs.pull'({ repo }: { repo: string }) {
+      await git(repo, ['lfs', 'pull'], { timeout: NETWORK_TIMEOUT });
+    },
+
+    async 'remote.setUrl'({ repo, name, url }: { repo: string; name: string; url: string }) {
+      assertSafe(name);
+      assertSafe(url);
+      await git(repo, ['remote', 'set-url', name, url]);
+    },
+
     // ---------------------------------------------------------------- shell
     async 'shell.reveal'({ repo, path: rel }: { repo: string; path?: string }) {
       const abs = rel ? insideRepo(repo, rel) : repo;
@@ -735,6 +1036,34 @@ function assertSafe(value: string) {
   if (typeof value !== 'string' || !value || value.startsWith('-') || value.includes('\0')) {
     throw new Error(`Invalid name: ${value}`);
   }
+}
+
+function assertHash(value: string) {
+  if (!/^[0-9a-f]{7,64}$/.test(value)) throw new Error(`Invalid object id: ${value}`);
+}
+
+function assertRef(ref: string) {
+  if (!/^refs\/(heads|tags)\/[^\0]+$/.test(ref) || ref.includes('..')) throw new Error(`Invalid ref: ${ref}`);
+}
+
+function shellQuote(s: string): string {
+  return `'${s.replace(/'/g, `'\\''`)}'`;
+}
+
+const MIME: Record<string, string> = {
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  gif: 'image/gif',
+  webp: 'image/webp',
+  avif: 'image/avif',
+  bmp: 'image/bmp',
+  ico: 'image/x-icon',
+  svg: 'image/svg+xml',
+};
+
+function mimeType(p: string): string {
+  return MIME[p.split('.').pop()?.toLowerCase() ?? ''] ?? 'application/octet-stream';
 }
 
 function assertStash(ref: string) {

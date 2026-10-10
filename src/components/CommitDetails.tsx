@@ -12,7 +12,7 @@ import { StatusBadge } from './StatusBadge';
 const AUTO_EXPAND_LINES = 4000;
 
 export function CommitDetails({ hash, badges, onNavigate }: { hash: string; badges?: BadgeRef[]; onNavigate: (hash: string) => void }) {
-  const { repo } = useRepo();
+  const { repo, setView } = useRepo();
   const ui = useUI();
   const [detail, setDetail] = useState<CommitDetail | null>(null);
   const [diffs, setDiffs] = useState<FileDiff[] | null>(null);
@@ -96,6 +96,9 @@ export function CommitDetails({ hash, badges, onNavigate }: { hash: string; badg
             onClick={() => document.getElementById(`diff-${hash}-${f.path}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' })}
             onContextMenu={(e) =>
               ui.menu(e, [
+                { label: 'Show File History', onClick: () => setView({ kind: 'file', path: f.path, mode: 'history', select: hash }) },
+                { label: 'Blame at This Commit', disabled: f.status === 'D', onClick: () => setView({ kind: 'file', path: f.path, mode: 'blame', rev: hash }) },
+                'separator',
                 { label: 'Copy Path', onClick: () => copyText(f.path) },
                 { label: 'Reveal in Finder', onClick: () => api.reveal(repo.path, f.path).catch((err) => ui.toast('error', 'Could not reveal file', String(err))) },
               ])
@@ -117,7 +120,16 @@ export function CommitDetails({ hash, badges, onNavigate }: { hash: string; badg
           const open = lines <= budget;
           budget -= lines;
           const p = d.newPath || d.oldPath;
-          return <FileDiffSection key={p} id={`diff-${hash}-${p}`} diff={d} defaultOpen={open} />;
+          const parent = detail.parents[0];
+          return (
+            <FileDiffSection
+              key={p}
+              id={`diff-${hash}-${p}`}
+              diff={d}
+              defaultOpen={open}
+              images={{ before: parent ? { revs: [parent], path: d.oldPath } : undefined, after: { revs: [hash], path: d.newPath } }}
+            />
+          );
         })}
       </div>
     </div>

@@ -1354,8 +1354,31 @@ textarea.input {
   display: flex;
   flex-direction: column;
   min-height: 0;
+  container-type: inline-size;
+}
+/* Give the subject room when the list is narrow: drop the SHA, then shrink and drop the author. */
+@container (max-width: 820px) {
+  .col-sha {
+    display: none;
+  }
+}
+@container (max-width: 640px) {
+  .col-author {
+    width: 110px;
+  }
+  .col-date {
+    width: 96px;
+  }
+}
+@container (max-width: 500px) {
+  .col-author {
+    display: none;
+  }
 }
 .commit-list-head {
+  /* Reserve the same scrollbar gutter as the list so header labels line up with their columns. */
+  overflow: hidden;
+  scrollbar-gutter: stable;
   display: flex;
   height: 24px;
   align-items: center;
@@ -1367,6 +1390,7 @@ textarea.input {
 }
 .commit-scroll {
   flex: 1;
+  scrollbar-gutter: stable;
   overflow-y: auto;
   overflow-x: hidden;
   outline: none;
@@ -1430,6 +1454,8 @@ textarea.input {
   overflow: hidden;
   text-overflow: ellipsis;
   padding-right: 8px;
+  flex: 1 1 auto;
+  min-width: 90px;
 }
 .commit-subject.merge {
   color: var(--text-muted);
@@ -1443,7 +1469,15 @@ textarea.input {
 
 .graph {
   flex: none;
-  overflow: visible;
+  /* Never draw lanes over the subject text. */
+  overflow: hidden;
+}
+.graph-none {
+  width: 10px;
+  flex: none;
+}
+.graph .node-ring.node-overflow {
+  fill: var(--bg);
 }
 .graph .lane {
   fill: none;
@@ -1518,7 +1552,17 @@ textarea.input {
   display: inline-flex;
   gap: 4px;
   margin-right: 6px;
-  flex: none;
+  flex-wrap: wrap;
+}
+/* In history rows badges give way long before the subject does. Ones that don't fit wrap onto
+   a hidden second line instead of being sliced; RefBadges sets a min-width so the first one
+   always keeps room to show its name. */
+.col-subject .ref-badges {
+  flex: 0 1000 auto;
+  align-content: flex-start;
+  height: 18px;
+  min-width: 0;
+  overflow: hidden;
 }
 .ref-badge {
   display: inline-flex;
@@ -1532,6 +1576,12 @@ textarea.input {
   line-height: 1;
   border: 1px solid transparent;
   max-width: 220px;
+  min-width: 28px;
+  flex: 0 1 auto;
+  overflow: hidden;
+}
+.ref-badge svg {
+  flex: none;
 }
 .ref-badge span {
   overflow: hidden;
@@ -2116,4 +2166,606 @@ textarea.input {
   .welcome-actions {
     grid-template-columns: 1fr;
   }
+}
+
+/* --------------------------------------------------------- syntax colors */
+
+:root {
+  --hl-keyword: #cf222e;
+  --hl-string: #0a3069;
+  --hl-number: #0550ae;
+  --hl-comment: #6e7781;
+  --hl-title: #8250df;
+  --hl-type: #953800;
+  --hl-attr: #0550ae;
+  --hl-tag: #116329;
+  --hl-variable: #953800;
+  --hl-meta: #6e7781;
+  --hl-regexp: #116329;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --hl-keyword: #ff7b72;
+    --hl-string: #a5d6ff;
+    --hl-number: #79c0ff;
+    --hl-comment: #8b949e;
+    --hl-title: #d2a8ff;
+    --hl-type: #ffa657;
+    --hl-attr: #79c0ff;
+    --hl-tag: #7ee787;
+    --hl-variable: #ffa657;
+    --hl-meta: #8b949e;
+    --hl-regexp: #7ee787;
+  }
+}
+.hljs-keyword,
+.hljs-doctag,
+.hljs-template-tag,
+.hljs-template-variable,
+.hljs-variable.language_,
+.hljs-selector-tag {
+  color: var(--hl-keyword);
+}
+.hljs-string,
+.hljs-meta .hljs-string,
+.hljs-char.escape_ {
+  color: var(--hl-string);
+}
+.hljs-number,
+.hljs-literal,
+.hljs-built_in,
+.hljs-symbol {
+  color: var(--hl-number);
+}
+.hljs-comment,
+.hljs-code,
+.hljs-formula {
+  color: var(--hl-comment);
+  font-style: italic;
+}
+.hljs-title,
+.hljs-title.function_,
+.hljs-title.class_,
+.hljs-section {
+  color: var(--hl-title);
+}
+.hljs-type,
+.hljs-title.class_.inherited__,
+.hljs-params {
+  color: var(--hl-type);
+}
+.hljs-attr,
+.hljs-attribute,
+.hljs-property,
+.hljs-selector-attr,
+.hljs-selector-class,
+.hljs-selector-id {
+  color: var(--hl-attr);
+}
+.hljs-name,
+.hljs-tag,
+.hljs-selector-pseudo,
+.hljs-quote {
+  color: var(--hl-tag);
+}
+.hljs-variable,
+.hljs-subst {
+  color: var(--hl-variable);
+}
+.hljs-meta,
+.hljs-meta .hljs-keyword {
+  color: var(--hl-meta);
+}
+.hljs-regexp,
+.hljs-link {
+  color: var(--hl-regexp);
+}
+.hljs-bullet {
+  color: var(--hl-type);
+}
+.hljs-emphasis {
+  font-style: italic;
+}
+.hljs-strong {
+  font-weight: 600;
+}
+.hljs-addition {
+  color: var(--add-fg);
+}
+.hljs-deletion {
+  color: var(--del-fg);
+}
+.diff-line.selected .diff-content span {
+  color: inherit;
+}
+
+/* --------------------------------------------------------- shared bits */
+
+.segmented {
+  display: inline-flex;
+  padding: 2px;
+  border-radius: 7px;
+  background: var(--bg-hover);
+  gap: 2px;
+}
+.segmented button {
+  border: none;
+  background: none;
+  border-radius: 5px;
+  padding: 2px 10px;
+  font-size: 12px;
+  color: var(--text-muted);
+  height: 22px;
+}
+.segmented button.active {
+  background: var(--bg-elevated);
+  color: var(--text);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12);
+}
+
+.toast-action {
+  align-self: center;
+  flex: none;
+}
+.askpass-prompt {
+  font-family: var(--mono);
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text);
+  background: var(--bg-hover);
+  border-radius: 6px;
+  padding: 8px 10px;
+  user-select: text;
+}
+.lfs-note {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  background: var(--accent-soft);
+  font-family: var(--font);
+}
+
+/* ------------------------------------------------------------ image diff */
+
+.image-diff {
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  font-family: var(--font);
+}
+.image-diff-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.image-panels {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 16px;
+}
+.image-panel {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.image-panel figcaption {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.image-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.image-panel.before .image-label {
+  color: var(--del-fg);
+}
+.image-panel.after .image-label {
+  color: var(--add-fg);
+}
+.image-frame {
+  min-height: 120px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 12px;
+  overflow: hidden;
+  position: relative;
+}
+.image-frame img {
+  max-width: 100%;
+  max-height: 60vh;
+  object-fit: contain;
+}
+.image-frame.onion {
+  display: grid;
+  place-items: center;
+}
+.image-frame.onion img {
+  grid-area: 1 / 1;
+}
+.checkerboard {
+  background-color: var(--bg);
+  background-image: linear-gradient(45deg, var(--bg-hover) 25%, transparent 25%), linear-gradient(-45deg, var(--bg-hover) 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, var(--bg-hover) 75%), linear-gradient(-45deg, transparent 75%, var(--bg-hover) 75%);
+  background-size: 16px 16px;
+  background-position: 0 0, 0 8px, 8px -8px, -8px 0;
+}
+
+/* --------------------------------------------------- file history & blame */
+
+.file-view {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.file-view-path {
+  max-width: 50%;
+}
+.file-history {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+.file-history-list {
+  flex: none;
+  overflow-y: auto;
+  background: var(--bg-pane);
+  padding: 4px 0;
+}
+.file-commit-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 7px 12px;
+}
+.file-commit-row .status-badge {
+  margin-top: 2px;
+}
+.file-commit-row:hover {
+  background: var(--bg-hover);
+}
+.file-commit-row.selected {
+  background: var(--selected);
+}
+.file-commit-text {
+  min-width: 0;
+  flex: 1;
+}
+.file-commit-subject {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+}
+.file-history-diff {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.file-history-head {
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  user-select: text;
+}
+.file-history-title {
+  font-weight: 650;
+  font-size: 14px;
+}
+.file-history-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.blame {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.blame-bar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-header);
+}
+.blame-line {
+  display: flex;
+  min-height: 18px;
+  cursor: default;
+}
+.blame-line.blame-first {
+  border-top: 1px solid var(--border);
+}
+.blame-line.blame-first:first-child {
+  border-top: none;
+}
+.blame-line:hover {
+  background: var(--bg-hover);
+}
+.blame-line.active {
+  background: var(--accent-soft);
+}
+.blame-info {
+  flex: none;
+  width: 320px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px 0 8px;
+  font-family: var(--font);
+  font-size: 11.5px;
+  color: var(--text-muted);
+  background: var(--gutter-bg);
+  border-left: 3px solid color-mix(in srgb, var(--accent) calc(var(--age, 0) * 100%), var(--border));
+  overflow: hidden;
+  white-space: nowrap;
+  user-select: none;
+}
+.blame-avatar {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex: none;
+}
+.blame-summary {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text);
+}
+.blame-meta {
+  flex: none;
+  color: var(--text-faint);
+}
+.blame-uncommitted {
+  color: var(--warning);
+  font-style: italic;
+}
+.blame-line .ln {
+  flex: none;
+  color: var(--text-faint);
+  background: var(--gutter-bg);
+  user-select: none;
+}
+.blame-line .diff-content {
+  padding-left: 10px;
+}
+
+/* ---------------------------------------------------------------- settings */
+
+.settings-view {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.settings-scroll {
+  flex: 1;
+  overflow-y: auto;
+}
+.settings-inner {
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 20px 24px 48px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.settings-section {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 16px 18px;
+  background: var(--bg-elevated);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.settings-section h3 {
+  margin: 0;
+  font-size: 13.5px;
+  font-weight: 650;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.settings-description {
+  margin: -4px 0 2px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+.settings-description code,
+.settings-callout code {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  background: var(--bg-hover);
+  padding: 1px 4px;
+  border-radius: 4px;
+}
+.settings-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+.settings-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.settings-list {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.settings-list-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px 6px 10px;
+  min-width: 0;
+}
+.settings-list-row + .settings-list-row {
+  border-top: 1px solid var(--border);
+}
+.remote-name {
+  font-weight: 600;
+  min-width: 70px;
+}
+.settings-list-row .input {
+  flex: 1;
+  height: 26px;
+}
+.settings-callout {
+  background: var(--warn-bg);
+  border: 1px solid var(--warn-border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-size: 12.5px;
+}
+.settings-callout-warn {
+  margin-top: 6px;
+  color: var(--text-muted);
+}
+.lfs-pattern {
+  font-family: var(--mono);
+  font-size: 12px;
+}
+.gitignore-editor {
+  min-height: 140px;
+}
+.submodule-path {
+  font-weight: 500;
+  white-space: nowrap;
+}
+.submodule-url {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.submodule-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex: none;
+  background: var(--success);
+}
+.submodule-dot.state-modified {
+  background: var(--warning);
+}
+.submodule-dot.state-uninitialized {
+  background: var(--text-faint);
+}
+.submodule-dot.state-conflict {
+  background: var(--danger);
+}
+
+/* -------------------------------------------------------- rebase dialog */
+
+.rebase-modal {
+  width: 720px;
+  max-height: 82vh;
+}
+.rebase-list {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow-y: auto;
+  max-height: 46vh;
+}
+.rebase-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px 6px 4px;
+  background: var(--bg-elevated);
+}
+.rebase-row + .rebase-row {
+  border-top: 1px solid var(--border);
+}
+.rebase-row.dragging {
+  opacity: 0.45;
+}
+.rebase-row.drop-target {
+  box-shadow: inset 0 2px 0 var(--accent);
+}
+.rebase-grip {
+  color: var(--text-faint);
+  cursor: grab;
+  display: flex;
+}
+.rebase-action {
+  width: 92px;
+  height: 26px;
+  flex: none;
+  padding: 0 4px;
+}
+.rebase-hash {
+  color: var(--text-muted);
+  flex: none;
+}
+.rebase-text {
+  flex: 1;
+  min-width: 0;
+}
+.rebase-subject {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rebase-message {
+  font-size: 12.5px;
+}
+.rebase-row.action-drop .rebase-subject {
+  text-decoration: line-through;
+  color: var(--text-faint);
+}
+.rebase-row.action-squash,
+.rebase-row.action-fixup {
+  padding-left: 22px;
+}
+.rebase-row.action-edit .rebase-action,
+.rebase-row.action-reword .rebase-action {
+  border-color: var(--accent);
+}
+.rebase-pushed {
+  font-size: 10.5px;
+  color: var(--warning);
+  border: 1px solid var(--warn-border);
+  background: var(--warn-bg);
+  border-radius: 8px;
+  padding: 0 6px;
+  flex: none;
+}
+.rebase-move {
+  display: flex;
+  flex: none;
+}
+.rebase-warning {
+  background: var(--warn-bg);
+  border: 1px solid var(--warn-border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 12px;
 }

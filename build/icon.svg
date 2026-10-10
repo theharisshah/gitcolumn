@@ -1,0 +1,49 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- GitColumn app icon. Source of truth for build/icon.{png,icns,ico} — regenerate with `npm run icons`. -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0.35" y2="1">
+      <stop offset="0" stop-color="#5d9dff"/>
+      <stop offset="0.55" stop-color="#3468ea"/>
+      <stop offset="1" stop-color="#1d3fbf"/>
+    </linearGradient>
+    <linearGradient id="shine" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.30"/>
+      <stop offset="0.45" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="branch" x1="0" y1="1" x2="0" y2="0">
+      <stop offset="0" stop-color="#7ee6ff"/>
+      <stop offset="1" stop-color="#b9f0ff"/>
+    </linearGradient>
+    <filter id="tile-shadow" x="-15%" y="-15%" width="130%" height="135%">
+      <feDropShadow dx="0" dy="14" stdDeviation="16" flood-color="#0b1a4a" flood-opacity="0.35"/>
+    </filter>
+    <filter id="glyph-shadow" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="8" stdDeviation="10" flood-color="#0b1a4a" flood-opacity="0.35"/>
+    </filter>
+  </defs>
+
+  <!-- tile -->
+  <rect x="100" y="100" width="824" height="824" rx="186" fill="url(#bg)" filter="url(#tile-shadow)"/>
+  <rect x="100" y="100" width="824" height="824" rx="186" fill="url(#shine)"/>
+  <rect x="102" y="102" width="820" height="820" rx="184" fill="none" stroke="#ffffff" stroke-opacity="0.16" stroke-width="4"/>
+
+  <!-- graph: a column of commits with a feature branch that leaves and merges back -->
+  <g filter="url(#glyph-shadow)">
+    <g fill="none" stroke-linecap="round">
+      <path d="M400 742 C400 650 640 676 640 590 V470 C640 384 400 410 400 318" stroke="url(#branch)" stroke-width="54"/>
+      <path d="M400 282 V778" stroke="#ffffff" stroke-width="62"/>
+    </g>
+    <g fill="#ffffff">
+      <circle cx="400" cy="282" r="68"/>
+      <circle cx="400" cy="530" r="52"/>
+      <circle cx="400" cy="778" r="68"/>
+      <circle cx="640" cy="530" r="64"/>
+    </g>
+    <g fill="#2f5ee0">
+      <circle cx="400" cy="282" r="31"/>
+      <circle cx="400" cy="530" r="22"/>
+      <circle cx="400" cy="778" r="31"/>
+      <circle cx="640" cy="530" r="29" fill="#2a8fd6"/>
+    </g>
+  </g>
+</svg>

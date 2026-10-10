@@ -1,17 +1,27 @@
 import type {
   ApiResult,
   AppInfo,
+  Blame,
+  Blob,
+  BlobSpec,
   Commit,
   CommitDetail,
+  FileCommit,
   FileDiff,
   FileStatus,
+  LfsFile,
+  LfsStatus,
   LineSelection,
   PatchAction,
+  RebasePlan,
+  RebaseStep,
   Ref,
   Remote,
   RepoInfo,
+  Snapshot,
   Stash,
   Status,
+  Submodule,
 } from '../../shared/types';
 
 declare global {
@@ -19,6 +29,9 @@ declare global {
     gitcolumn?: {
       platform: string;
       invoke(method: string, args: unknown): Promise<ApiResult>;
+      onAskpass(cb: (req: { id: number; prompt: string }) => void): () => void;
+      replyAskpass(id: number, value: string | null): void;
+      onMenu(cb: (command: string) => void): () => void;
     };
   }
 }
@@ -72,7 +85,12 @@ export const api = {
     opts: { ref?: string; all?: boolean; skip?: number; limit?: number; search?: string; searchMode?: SearchMode; path?: string },
   ) => call<Commit[]>('log', { repo, ...opts }),
   commitDetail: (repo: string, hash: string) => call<CommitDetail>('commit.detail', { repo, hash }),
-  commitDiff: (repo: string, hash: string, parent?: string) => call<FileDiff[]>('commit.diff', { repo, hash, parent }),
+  commitDiff: (repo: string, hash: string, parent?: string, paths?: string[]) =>
+    call<FileDiff[]>('commit.diff', { repo, hash, parent, paths }),
+  fileHistory: (repo: string, path: string, skip = 0) => call<FileCommit[]>('file.history', { repo, path, skip }),
+  blame: (repo: string, path: string, rev?: string | null) => call<Blame>('blame', { repo, path, rev }),
+  blob: (repo: string, spec: BlobSpec) => call<Blob | null>('file.blob', { repo, ...spec }),
+  writeGitignore: (repo: string, content: string) => call('gitignore.write', { repo, content }),
   lastCommitMessage: (repo: string) => call<string>('commit.lastMessage', { repo }),
   workingDiff: (repo: string, file: FileStatus, staged: boolean, opts: { ignoreWhitespace?: boolean; context?: number } = {}) =>
     call<FileDiff | null>('diff.working', { repo, file, staged, ...opts }),
@@ -104,12 +122,32 @@ export const api = {
   rebase: (repo: string, onto: string) => call<ConflictResult>('rebase', { repo, onto }),
   cherryPick: (repo: string, hash: string) => call<ConflictResult>('cherryPick', { repo, hash }),
   revert: (repo: string, hash: string, parent?: number) => call<ConflictResult>('revert', { repo, hash, parent }),
-  reset: (repo: string, hash: string, mode: 'soft' | 'mixed' | 'hard') => call('reset', { repo, hash, mode }),
+  reset: (repo: string, hash: string, mode: 'soft' | 'mixed' | 'hard' | 'keep') => call('reset', { repo, hash, mode }),
+  rebasePlan: (repo: string, base: string | null) => call<RebasePlan>('rebase.plan', { repo, base }),
+  rebaseInteractive: (repo: string, base: string | null, steps: RebaseStep[]) =>
+    call<ConflictResult & { paused: boolean }>('rebase.interactive', { repo, base, steps }),
+  snapshot: (repo: string, paths?: string[]) => call<Snapshot>('snapshot.capture', { repo, paths }),
+  restoreSnapshot: (repo: string, snapshot: Snapshot, index = true) => call('snapshot.restore', { repo, snapshot, index }),
+  revParse: (repo: string, rev: string) => call<string | null>('rev.parse', { repo, rev }),
+  updateRef: (repo: string, ref: string, hash: string) => call('ref.update', { repo, ref, hash }),
+  deleteRef: (repo: string, ref: string) => call('ref.delete', { repo, ref }),
+  stashStore: (repo: string, hash: string, message: string) => call('stash.store', { repo, hash, message }),
+  submodules: (repo: string) => call<Submodule[]>('submodules', { repo }),
+  updateSubmodule: (repo: string, path?: string) => call('submodule.update', { repo, path }),
+  addSubmodule: (repo: string, url: string, path: string) => call('submodule.add', { repo, url, path }),
+  syncSubmodules: (repo: string) => call('submodule.sync', { repo }),
+  lfsStatus: (repo: string) => call<LfsStatus>('lfs.status', { repo }),
+  lfsFiles: (repo: string) => call<LfsFile[]>('lfs.files', { repo }),
+  lfsInstall: (repo: string) => call('lfs.install', { repo }),
+  lfsTrack: (repo: string, pattern: string) => call('lfs.track', { repo, pattern }),
+  lfsUntrack: (repo: string, pattern: string) => call('lfs.untrack', { repo, pattern }),
+  lfsPull: (repo: string) => call('lfs.pull', { repo }),
+  setRemoteUrl: (repo: string, name: string, url: string) => call('remote.setUrl', { repo, name, url }),
   continueOp: (repo: string) => call<ConflictResult>('op.continue', { repo }),
   abortOp: (repo: string) => call('op.abort', { repo }),
   skipOp: (repo: string) => call<ConflictResult>('op.skip', { repo }),
 
-  fetch: (repo: string, remote?: string) => call('fetch', { repo, remote }),
+  fetch: (repo: string, remote?: string, quiet?: boolean) => call('fetch', { repo, remote, quiet }),
   pull: (repo: string, rebase?: boolean) => call<ConflictResult>('pull', { repo, rebase }),
   push: (repo: string, branch: string, opts: { remote?: string; force?: boolean; setUpstream?: boolean } = {}) =>
     call<{ remote: string }>('push', { repo, branch, ...opts }),

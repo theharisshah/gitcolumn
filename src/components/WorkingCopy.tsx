@@ -70,10 +70,10 @@ export function WorkingCopy() {
       const stageable = targets.filter((f) => !f.conflicted);
       if (!stageable.length) return;
       const allStaged = stageable.every((f) => stageState(f) === 'full');
-      if (allStaged) run('Unstaging…', () => api.unstage(repo.path, pathsOf(stageable)));
-      else run('Staging…', () => api.stage(repo.path, pathsOf(stageable)));
+      if (allStaged) actions.unstage(pathsOf(stageable));
+      else actions.stage(pathsOf(stageable));
     },
-    [repo.path, run],
+    [actions],
   );
 
   const onRowClick = (e: React.MouseEvent, f: FileStatus) => {
@@ -98,8 +98,8 @@ export function WorkingCopy() {
     const items: MenuItem[] = [];
     const canStage = targets.some((t) => !t.conflicted && stageState(t) !== 'full');
     const canUnstage = targets.some((t) => !t.conflicted && t.index !== '.');
-    if (canStage) items.push({ label: targets.length > 1 ? `Stage ${targets.length} Files` : 'Stage', onClick: () => run('Staging…', () => api.stage(repo.path, pathsOf(targets.filter((t) => !t.conflicted)))) });
-    if (canUnstage) items.push({ label: targets.length > 1 ? `Unstage ${targets.length} Files` : 'Unstage', onClick: () => run('Unstaging…', () => api.unstage(repo.path, pathsOf(targets.filter((t) => t.index !== '.')))) });
+    if (canStage) items.push({ label: targets.length > 1 ? `Stage ${targets.length} Files` : 'Stage', onClick: () => actions.stage(pathsOf(targets.filter((t) => !t.conflicted))) });
+    if (canUnstage) items.push({ label: targets.length > 1 ? `Unstage ${targets.length} Files` : 'Unstage', onClick: () => actions.unstage(pathsOf(targets.filter((t) => t.index !== '.'))) });
     if (targets.some((t) => t.conflicted)) {
       items.push('separator', { header: 'Resolve Conflict' });
       items.push({ label: 'Mark as Resolved', onClick: () => run('Marking resolved…', () => api.stage(repo.path, targets.map((t) => t.path))) });
@@ -110,6 +110,10 @@ export function WorkingCopy() {
     items.push({ label: targets.length > 1 ? `Discard Changes in ${targets.length} Files…` : 'Discard Changes…', danger: true, icon: <Undo2 size={14} />, onClick: () => actions.discard(targets) });
     if (single) {
       items.push('separator');
+      if (!single.untracked && !(single.index === 'A' && single.worktree === '.')) {
+        items.push({ label: 'Show File History', onClick: () => actions.showFileHistory(single.path) });
+        items.push({ label: 'Blame', onClick: () => actions.blame(single.path) });
+      }
       items.push({ label: 'Reveal in Finder', icon: <FolderOpen size={14} />, onClick: () => api.reveal(repo.path, single.path).catch((err) => ui.toast('error', 'Could not reveal file', String(err))) });
       items.push({ label: 'Open with Default App', onClick: () => api.openPath(repo.path, single.path).catch((err) => ui.toast('error', 'Could not open file', String(err))) });
       items.push({ label: 'Copy Path', onClick: () => copyText(single.path) });
@@ -145,7 +149,7 @@ export function WorkingCopy() {
           <Checkbox
             state={allState}
             disabled={!files.length || files.every((f) => f.conflicted)}
-            onClick={() => run(allState === 'full' ? 'Unstaging…' : 'Staging…', () => (allState === 'full' ? api.unstageAll(repo.path) : api.stageAll(repo.path)))}
+            onClick={() => (allState === 'full' ? actions.unstageAll() : actions.stageAll())}
             title={allState === 'full' ? 'Unstage all' : 'Stage all'}
           />
           <span className="pane-title">
@@ -262,7 +266,7 @@ function WorkingFileDiff({
   version: number;
   subscribeTick: (cb: () => void) => () => void;
 }) {
-  const { repo, run } = useRepo();
+  const { repo } = useRepo();
   const ui = useUI();
   const actions = useActions();
   const [ignoreWs, setIgnoreWs] = useState(false);
@@ -300,15 +304,7 @@ function WorkingFileDiff({
       ui.toast('info', 'Turn off "Ignore whitespace" to stage or discard individual hunks');
       return;
     }
-    const go = () =>
-      run(action === 'stage' ? 'Staging…' : action === 'unstage' ? 'Unstaging…' : 'Discarding…', () =>
-        api.applyPatch(repo.path, diff, selection, action),
-      );
-    if (action === 'discard') {
-      ui.confirm({ title: 'Discard these changes?', message: 'The selected changes will be removed from your working copy. This cannot be undone.', confirmLabel: 'Discard', danger: true }).then((ok) => {
-        if (ok) go();
-      });
-    } else go();
+    actions.applyPatch(diff, selection, action);
   };
 
   const both = hasStaged && hasUnstaged;
@@ -325,13 +321,18 @@ function WorkingFileDiff({
           Ignore whitespace
         </label>
         {hasUnstaged && (
-          <button className="button button-small" onClick={() => run('Staging…', () => api.stage(repo.path, pathsOf([file])))}>
+          <button className="button button-small" onClick={() => actions.stage(pathsOf([file]))}>
             Stage File
           </button>
         )}
         {hasStaged && (
-          <button className="button button-small" onClick={() => run('Unstaging…', () => api.unstage(repo.path, pathsOf([file])))}>
+          <button className="button button-small" onClick={() => actions.unstage(pathsOf([file]))}>
             Unstage File
+          </button>
+        )}
+        {!file.untracked && (
+          <button className="button button-small" onClick={() => actions.blame(file.path)} title="Show who changed each line">
+            Blame
           </button>
         )}
         <button className="button button-small button-danger-outline" onClick={() => actions.discard([file])}>
@@ -343,13 +344,23 @@ function WorkingFileDiff({
         {diffs?.unstaged && (
           <>
             {both && <div className="diff-section-title">Unstaged changes</div>}
-            <DiffView diff={diffs.unstaged} mode={file.untracked ? 'readonly' : 'unstaged'} onApply={apply(diffs.unstaged)} />
+            <DiffView
+              diff={diffs.unstaged}
+              mode={file.untracked ? 'readonly' : 'unstaged'}
+              onApply={apply(diffs.unstaged)}
+              images={{ before: { revs: [':'], path: file.path }, after: { revs: [null], path: file.path } }}
+            />
           </>
         )}
         {diffs?.staged && (
           <>
             {both && <div className="diff-section-title staged">Staged changes</div>}
-            <DiffView diff={diffs.staged} mode="staged" onApply={apply(diffs.staged)} />
+            <DiffView
+              diff={diffs.staged}
+              mode="staged"
+              onApply={apply(diffs.staged)}
+              images={{ before: { revs: ['HEAD'], path: file.origPath ?? file.path }, after: { revs: [':'], path: file.path } }}
+            />
           </>
         )}
         {diffs && !diffs.staged && !diffs.unstaged && !error && <div className="diff-note">No textual changes.</div>}

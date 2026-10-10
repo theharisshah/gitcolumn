@@ -1,4 +1,6 @@
-import { Archive, ChevronDown, ChevronRight, Cloud, Folder, GitBranch, History, Inbox, Plus, Search, Server, Tag, X } from 'lucide-react';
+import { Archive, ChevronDown, ChevronRight, Cloud, Folder, GitBranch, History, Inbox, Package, Plus, Search, Server, Settings, Tag, X } from 'lucide-react';
+import { useApp } from '../AppContext';
+import { api } from '../lib/api';
 import { useMemo, useState, type ReactNode } from 'react';
 import type { Ref } from '../../shared/types';
 import { copyText } from '../lib/format';
@@ -56,7 +58,8 @@ function useCollapsed() {
 }
 
 export function Sidebar() {
-  const { status, refs, remotes, stashes, view, setView } = useRepo();
+  const { repo, status, refs, remotes, stashes, submodules, view, setView } = useRepo();
+  const app = useApp();
   const actions = useActions();
   const ui = useUI();
   const { collapsed, toggle } = useCollapsed();
@@ -204,6 +207,7 @@ export function Sidebar() {
           <SidebarItem icon={<Inbox size={14} />} label="Working Copy" active={isActive({ kind: 'working' })} badge={changes || undefined} onClick={() => setView({ kind: 'working' })} />
           <SidebarItem icon={<History size={14} />} label="History" active={isActive({ kind: 'history' })} onClick={() => setView({ kind: 'history' })} />
           <SidebarItem icon={<Archive size={14} />} label="Stashes" active={isActive({ kind: 'stashes' })} badge={stashes.length || undefined} muted onClick={() => setView({ kind: 'stashes' })} />
+          <SidebarItem icon={<Settings size={14} />} label="Settings" active={isActive({ kind: 'settings' })} onClick={() => setView({ kind: 'settings' })} />
         </div>
 
         {section(
@@ -270,6 +274,40 @@ export function Sidebar() {
             <Plus size={13} />
           </button>,
         )}
+
+        {submodules.length > 0 &&
+          section(
+            'submodules',
+            'Submodules',
+            submodules.length,
+            submodules
+              .filter((sm) => !f || sm.path.toLowerCase().includes(f))
+              .map((sm) => (
+                <div
+                  key={sm.path}
+                  className="sidebar-item"
+                  style={{ paddingLeft: 12 }}
+                  title={`${sm.path}\n${sm.url}\n${sm.state === 'ok' ? 'Up to date' : sm.state === 'modified' ? 'Checked-out commit differs from the recorded one' : sm.state === 'uninitialized' ? 'Not initialized — double-click to initialize' : 'Conflict'}`}
+                  onDoubleClick={() => (sm.state === 'uninitialized' ? actions.updateSubmodule(sm.path) : app.openRepo(`${repo.path}/${sm.path}`))}
+                  onContextMenu={(e) =>
+                    ui.menu(e, [
+                      { label: 'Open in New Tab', disabled: sm.state === 'uninitialized', onClick: () => app.openRepo(`${repo.path}/${sm.path}`) },
+                      { label: sm.state === 'uninitialized' ? 'Initialize' : 'Update to Recorded Commit', onClick: () => actions.updateSubmodule(sm.path) },
+                      'separator',
+                      { label: 'Reveal in Finder', onClick: () => api.reveal(repo.path, sm.path).catch(() => undefined) },
+                      { label: 'Copy URL', onClick: () => copyText(sm.url) },
+                    ])
+                  }
+                >
+                  <Package size={13} className="ref-icon" />
+                  <span className="sidebar-label">{sm.path}</span>
+                  <span className={`submodule-dot state-${sm.state}`} />
+                </div>
+              )),
+            <button className="icon-button" title="Add submodule" onClick={() => actions.addSubmodule()}>
+              <Plus size={13} />
+            </button>,
+          )}
       </div>
       <div className="sidebar-filter">
         <Search size={12} />

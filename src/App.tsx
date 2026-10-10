@@ -1,6 +1,7 @@
 import { Plus, X } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
 import type { AppInfo, RepoInfo } from '../shared/types';
+import { AppContext } from './AppContext';
 import { RepoWindow } from './components/RepoWindow';
 import { Welcome, type Recent } from './components/Welcome';
 import { api, isElectron } from './lib/api';
@@ -165,6 +166,8 @@ function Shell() {
   };
 
   useEffect(() => {
+    // In Electron, ⌘O comes from the native menu instead.
+    if (window.gitcolumn) return window.gitcolumn.onMenu((command) => command === 'open' && openDialog());
     const onKey = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && !e.shiftKey && e.key.toLowerCase() === 'o') {
         e.preventDefault();
@@ -174,6 +177,30 @@ function Shell() {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   });
+
+  // git / ssh asking for credentials or a passphrase (Electron askpass bridge).
+  useEffect(() => {
+    if (!window.gitcolumn) return;
+    return window.gitcolumn.onAskpass(async ({ id, prompt }) => {
+      const p = prompt.trim();
+      const isQuestion = /\(yes\/no/i.test(p);
+      const isUser = /^username/i.test(p);
+      const v = await ui.form({
+        title: isQuestion ? 'Confirm Connection' : 'Authentication Required',
+        message: <pre className="askpass-prompt">{p}</pre>,
+        fields: [
+          {
+            name: 'value',
+            label: isQuestion ? 'Answer' : isUser ? 'Username' : /passphrase/i.test(p) ? 'Passphrase' : 'Password or token',
+            type: isQuestion || isUser ? 'text' : 'password',
+            value: isQuestion ? 'yes' : '',
+          },
+        ],
+        confirmLabel: 'Continue',
+      });
+      window.gitcolumn!.replyAskpass(id, v ? String(v.value) : null);
+    });
+  }, [ui]);
 
   const tabBar =
     tabs.length > 1 || (tabs.length && !active) ? (
@@ -199,6 +226,7 @@ function Shell() {
     ) : null;
 
   return (
+    <AppContext.Provider value={{ openRepo: openPath }}>
     <div className="app">
       {tabs.map((t) => (
         <RepoWindow key={t.path} repo={t} active={t.path === active} tabs={tabBar} onRepoMenu={repoMenu} onClose={() => closeTab(t.path)} />
@@ -218,5 +246,6 @@ function Shell() {
         </>
       )}
     </div>
+    </AppContext.Provider>
   );
 }

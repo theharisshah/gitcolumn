@@ -1,21 +1,32 @@
-import { ChevronDown, ChevronRight } from 'lucide-react';
+import { ChevronDown, ChevronRight, HardDrive } from 'lucide-react';
 import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import type { DiffLine, FileDiff, Hunk, LineSelection, PatchAction, StatusCode } from '../../shared/types';
+import type { BlobSpec, DiffLine, FileDiff, Hunk, LineSelection, PatchAction, StatusCode } from '../../shared/types';
+import { highlightHunk, languageFor, type Segment } from '../lib/highlight';
+import { getSetting } from '../lib/settings';
 import { hunkHighlights, type Range } from '../lib/worddiff';
+import { ImageDiff, isImagePath } from './ImageDiff';
 import { StatusBadge } from './StatusBadge';
 
 export type DiffMode = 'unstaged' | 'staged' | 'readonly';
+
+/** Where to load the before/after versions of a binary image from. */
+export interface ImageSources {
+  before?: BlobSpec;
+  after?: BlobSpec;
+}
 
 interface DiffViewProps {
   diff: FileDiff;
   mode?: DiffMode;
   onApply?: (selection: LineSelection, action: PatchAction) => void;
+  images?: ImageSources;
 }
 
 const LARGE_DIFF = 5000;
+const LFS_POINTER = 'version https://git-lfs.github.com/spec/v1';
 
 /** Hunks of a single file diff, with optional hunk / line staging controls. */
-export const DiffView = memo(function DiffView({ diff, mode = 'readonly', onApply }: DiffViewProps) {
+export const DiffView = memo(function DiffView({ diff, mode = 'readonly', onApply, images }: DiffViewProps) {
   const [selection, setSelection] = useState<Map<number, Set<number>>>(new Map());
   const [showLarge, setShowLarge] = useState(false);
   const drag = useRef<{ hunk: number; select: boolean } | null>(null);
@@ -28,9 +39,15 @@ export const DiffView = memo(function DiffView({ diff, mode = 'readonly', onAppl
   }, []);
 
   const lineCount = useMemo(() => diff.hunks.reduce((n, h) => n + h.lines.length, 0), [diff]);
+  const path = diff.newPath || diff.oldPath;
+  const lang = useMemo(() => (getSetting('syntaxHighlighting') ? languageFor(path) : null), [path]);
+  const isLfs = useMemo(() => diff.hunks.some((h) => h.lines.some((l) => l.content === LFS_POINTER)), [diff]);
   const canPartial = mode !== 'readonly' && !!onApply && !diff.isBinary && !diff.isNew && !diff.isDeleted && !diff.isRename;
 
-  if (diff.isBinary) return <div className="diff-note">Binary file — no textual diff available.</div>;
+  if (diff.isBinary) {
+    if (images && isImagePath(path)) return <ImageDiff before={diff.isNew ? undefined : images.before} after={diff.isDeleted ? undefined : images.after} />;
+    return <div className="diff-note">Binary file — no textual diff available.</div>;
+  }
   if (!diff.hunks.length) {
     let note = 'No content changes.';
     if (diff.isNew) note = 'Empty file added.';
@@ -70,18 +87,19 @@ export const DiffView = memo(function DiffView({ diff, mode = 'readonly', onAppl
 
   return (
     <div className={`diff ${canPartial ? 'diff-selectable' : ''}`}>
+      {isLfs && (
+        <div className="diff-note lfs-note">
+          <HardDrive size={13} /> Git LFS pointer — the file's content is stored in Git LFS. The pointer change is shown below.
+        </div>
+      )}
       {diff.hunks.map((hunk, hi) => (
         <HunkView
           key={hi}
           hunk={hunk}
-          index={hi}
+          lang={lineCount <= LARGE_DIFF ? lang : null}
           selected={selection.get(hi)}
           canPartial={canPartial}
-          actions={
-            canPartial ? (
-              <HunkActions mode={mode} count={selection.get(hi)?.size ?? 0} onAction={(a) => apply(hi, a)} />
-            ) : null
-          }
+          actions={canPartial ? <HunkActions mode={mode} count={selection.get(hi)?.size ?? 0} onAction={(a) => apply(hi, a)} /> : null}
           onGutterDown={(li, isSelected) => {
             drag.current = { hunk: hi, select: !isSelected };
             toggle(hi, li, !isSelected);
@@ -119,6 +137,7 @@ function HunkActions({ mode, count, onAction }: { mode: DiffMode; count: number;
 
 const HunkView = memo(function HunkView({
   hunk,
+  lang,
   selected,
   canPartial,
   actions,
@@ -126,7 +145,7 @@ const HunkView = memo(function HunkView({
   onGutterEnter,
 }: {
   hunk: Hunk;
-  index: number;
+  lang: string | null;
   selected?: Set<number>;
   canPartial: boolean;
   actions: ReactNode;
@@ -134,6 +153,7 @@ const HunkView = memo(function HunkView({
   onGutterEnter: (line: number) => void;
 }) {
   const highlights = useMemo(() => hunkHighlights(hunk), [hunk]);
+  const syntax = useMemo(() => (lang ? highlightHunk(hunk, lang) : null), [hunk, lang]);
   return (
     <div className="hunk">
       <div className="hunk-header">
@@ -165,7 +185,7 @@ const HunkView = memo(function HunkView({
               <span className="ln">{line.newNo ?? ''}</span>
             </span>
             <span className="diff-sign">{line.type === 'add' ? '+' : line.type === 'del' ? '−' : ' '}</span>
-            <LineContent line={line} ranges={highlights.get(li)} />
+            <LineContent line={line} ranges={highlights.get(li)} segments={syntax?.[li]} />
           </div>
         );
       })}
@@ -173,32 +193,47 @@ const HunkView = memo(function HunkView({
   );
 });
 
-function LineContent({ line, ranges }: { line: DiffLine; ranges?: Range[] }) {
-  const eol = line.noNewline ? <span className="diff-nonl" title="No newline at end of file">⏎̸</span> : null;
-  if (!ranges?.length) {
-    return (
-      <span className="diff-content">
-        {line.content || ' '}
-        {eol}
-      </span>
-    );
-  }
+/** Render a line from syntax segments, marking word-level changes on top. */
+export function CodeText({ text, segments, ranges }: { text: string; segments?: Segment[]; ranges?: Range[] }) {
+  const segs = segments ?? [{ text }];
+  if (!text) return <> </>;
+  if (!ranges?.length && !segments) return <>{text}</>;
   const parts: ReactNode[] = [];
   let pos = 0;
-  ranges.forEach(([s, e], i) => {
-    if (s > pos) parts.push(line.content.slice(pos, s));
-    parts.push(
-      <mark key={i} className="diff-word">
-        {line.content.slice(s, e)}
-      </mark>,
-    );
-    pos = e;
+  let r = 0;
+  segs.forEach((seg, si) => {
+    let start = pos;
+    const end = pos + seg.text.length;
+    while (start < end) {
+      while (ranges && r < ranges.length && ranges[r][1] <= start) r++;
+      const range = ranges?.[r];
+      let stop = end;
+      let marked = false;
+      if (range && range[0] <= start) {
+        marked = true;
+        stop = Math.min(end, range[1]);
+      } else if (range && range[0] < end) {
+        stop = range[0];
+      }
+      const piece = seg.text.slice(start - pos, stop - pos);
+      const cls = [seg.cls, marked ? 'diff-word' : ''].filter(Boolean).join(' ');
+      parts.push(cls ? <span key={`${si}-${start}`} className={cls}>{piece}</span> : piece);
+      start = stop;
+    }
+    pos = end;
   });
-  if (pos < line.content.length) parts.push(line.content.slice(pos));
+  return <>{parts}</>;
+}
+
+function LineContent({ line, ranges, segments }: { line: DiffLine; ranges?: Range[]; segments?: Segment[] }) {
   return (
     <span className="diff-content">
-      {parts}
-      {eol}
+      <CodeText text={line.content} segments={segments} ranges={ranges} />
+      {line.noNewline && (
+        <span className="diff-nonl" title="No newline at end of file">
+          ⏎̸
+        </span>
+      )}
     </span>
   );
 }
@@ -215,11 +250,13 @@ export const FileDiffSection = memo(function FileDiffSection({
   diff,
   id,
   defaultOpen = true,
+  images,
   onContextMenu,
 }: {
   diff: FileDiff;
   id?: string;
   defaultOpen?: boolean;
+  images?: ImageSources;
   onContextMenu?: (e: React.MouseEvent) => void;
 }) {
   const [open, setOpen] = useState(defaultOpen);
@@ -240,7 +277,7 @@ export const FileDiffSection = memo(function FileDiffSection({
         </span>
         <DiffStat additions={diff.additions} deletions={diff.deletions} />
       </header>
-      {open && <DiffView diff={diff} />}
+      {open && <DiffView diff={diff} images={images} />}
     </section>
   );
 });

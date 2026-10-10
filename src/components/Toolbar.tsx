@@ -13,17 +13,19 @@ import {
   Plus,
   RefreshCw,
   Search,
+  Settings,
   SquareTerminal,
 } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { api, isElectron } from '../lib/api';
 import { isMac, modKey, shortHash } from '../lib/format';
+import { getSetting, setSetting } from '../lib/settings';
 import { useActions } from '../repo/actions';
 import { useRepo } from '../repo/RepoContext';
 import { useUI } from '../ui/UIProvider';
 
 export function Toolbar({ onRepoMenu }: { onRepoMenu: (e: React.MouseEvent) => void }) {
-  const { repo, status, refs, stashes, busy, refresh } = useRepo();
+  const { repo, status, refs, stashes, busy, refresh, setView } = useRepo();
   const actions = useActions();
   const ui = useUI();
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -78,11 +80,11 @@ export function Toolbar({ onRepoMenu }: { onRepoMenu: (e: React.MouseEvent) => v
           badge={status?.behind || undefined}
           onClick={() => actions.pull()}
           onContextMenu={(e) => {
-            const rebase = localStorage.getItem('gitcolumn.pullRebase') === '1';
+            const rebase = getSetting('pullRebase');
             ui.menu(e, [
               { header: 'When pulling' },
-              { label: 'Merge remote changes', checked: !rebase, onClick: () => localStorage.setItem('gitcolumn.pullRebase', '0') },
-              { label: 'Rebase onto remote changes', checked: rebase, onClick: () => localStorage.setItem('gitcolumn.pullRebase', '1') },
+              { label: 'Merge remote changes', checked: !rebase, onClick: () => setSetting('pullRebase', false) },
+              { label: 'Rebase onto remote changes', checked: rebase, onClick: () => setSetting('pullRebase', true) },
             ]);
           }}
           disabled={!!busy || !hasRemote}
@@ -116,6 +118,7 @@ export function Toolbar({ onRepoMenu }: { onRepoMenu: (e: React.MouseEvent) => v
         <ToolButton icon={<RefreshCw size={16} />} onClick={() => refresh()} title={`Refresh (${modKey}R)`} small />
         <ToolButton icon={<FolderOpen size={16} />} onClick={() => api.reveal(repo.path).catch((e) => ui.toast('error', 'Could not open folder', String(e)))} title="Show in Finder" small />
         <ToolButton icon={<SquareTerminal size={16} />} onClick={() => api.openTerminal(repo.path).catch((e) => ui.toast('error', 'Could not open terminal', String(e)))} title="Open in Terminal" small />
+        <ToolButton icon={<Settings size={16} />} onClick={() => setView({ kind: 'settings' })} title={`Repository settings (${modKey},)`} small />
       </div>
     </header>
   );
