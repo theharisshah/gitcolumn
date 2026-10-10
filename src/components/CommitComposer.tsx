@@ -1,19 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
 import { api } from '../lib/api';
+import { draftFromMessage, loadDraft, saveDraft } from '../lib/draft';
 import { modKey, plural } from '../lib/format';
 import { useActions } from '../repo/actions';
 import { useRepo } from '../repo/RepoContext';
 import { useUI } from '../ui/UIProvider';
-
-const draftKey = (repo: string) => `gitcolumn.draft:${repo}`;
-
-function loadDraft(repo: string): { subject: string; body: string } {
-  try {
-    return JSON.parse(localStorage.getItem(draftKey(repo)) ?? '') as { subject: string; body: string };
-  } catch {
-    return { subject: '', body: '' };
-  }
-}
 
 export function CommitComposer({ stagedCount, totalCount }: { stagedCount: number; totalCount: number }) {
   const { repo, status } = useRepo();
@@ -29,14 +20,7 @@ export function CommitComposer({ stagedCount, totalCount }: { stagedCount: numbe
   const inMerge = !!(state?.merging || state?.cherryPicking || state?.reverting);
   const conflicts = status?.files.filter((f) => f.conflicted).length ?? 0;
 
-  useEffect(() => {
-    try {
-      if (subject || body) localStorage.setItem(draftKey(repo.path), JSON.stringify({ subject, body }));
-      else localStorage.removeItem(draftKey(repo.path));
-    } catch {
-      /* storage unavailable */
-    }
-  }, [repo.path, subject, body]);
+  useEffect(() => saveDraft(repo.path, { subject, body }), [repo.path, subject, body]);
 
   // Pre-fill the merge / cherry-pick message.
   // Once the operation ends (committed elsewhere or aborted), drop the pre-filled text if it's untouched.
@@ -62,9 +46,9 @@ export function CommitComposer({ stagedCount, totalCount }: { stagedCount: numbe
     const restore = (e: Event) => {
       const detail = (e as CustomEvent<{ repo: string; message: string }>).detail;
       if (detail.repo !== repo.path) return;
-      const [first, ...rest] = detail.message.split('\n');
-      setSubject(first);
-      setBody(rest.join('\n').trim());
+      const draft = draftFromMessage(detail.message);
+      setSubject(draft.subject);
+      setBody(draft.body);
     };
     window.addEventListener('gitcolumn:restore-message', restore);
     return () => window.removeEventListener('gitcolumn:restore-message', restore);

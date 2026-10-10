@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import type { Ref, Remote, RepoInfo, Stash, Status, Submodule } from '../../shared/types';
+import type { Ref, Remote, RepoInfo, Stash, Status, Submodule, UndoSpec, UndoState } from '../../shared/types';
 import { api, type ConflictResult } from '../lib/api';
+import { draftFromMessage, saveDraft } from '../lib/draft';
 import { getSetting, onSettingsChange } from '../lib/settings';
 import { useUI } from '../ui/UIProvider';
 import { navBack, navForward, navInit, navPush, navReplace, type NavState, type View } from './navigation';
@@ -12,9 +13,10 @@ export interface ViewMemo {
   set(key: string, value: unknown): void;
 }
 
+/** How to undo an operation; persisted per repository so it survives restarts. */
 export interface UndoEntry {
   label: string;
-  run: () => Promise<unknown>;
+  spec: UndoSpec;
 }
 
 export interface RunOptions<T> {
@@ -56,6 +58,8 @@ export interface RepoCtx {
   run<T>(label: string, fn: () => Promise<T>, opts?: RunOptions<T>): Promise<T | undefined>;
   undo(): Promise<void>;
   canUndo: boolean;
+  /** Label of the operation ⌘Z would undo */
+  undoLabel: string | null;
 }
 
 const Ctx = createContext<RepoCtx | null>(null);
@@ -67,7 +71,6 @@ export function useRepo(): RepoCtx {
 }
 
 const POLL_MS = 3000;
-const MAX_UNDO = 30;
 
 export function RepoProvider({ repo, active = true, children }: { repo: RepoInfo; active?: boolean; children: ReactNode }) {
   const ui = useUI();
@@ -95,10 +98,9 @@ export function RepoProvider({ repo, active = true, children }: { repo: RepoInfo
   }, []);
   const canGoBack = nav.index > 0;
   const canGoForward = nav.index < nav.stack.length - 1;
-  const [undoCount, setUndoCount] = useState(0);
+  const [undoState, setUndoState] = useState<UndoState>({ count: 0, top: null });
   const fingerprint = useRef('');
   const busyRef = useRef(false);
-  const undoStack = useRef<UndoEntry[]>([]);
   const tickListeners = useRef(new Set<() => void>());
   const subscribeTick = useCallback((cb: () => void) => {
     tickListeners.current.add(cb);
@@ -179,10 +181,8 @@ export function RepoProvider({ repo, active = true, children }: { repo: RepoInfo
     return () => clearInterval(timer);
   }, [active, autoFetch, hasRemotes, repo.path, load]);
 
-  const pushUndo = useCallback((entry: UndoEntry) => {
-    undoStack.current = [...undoStack.current.slice(-(MAX_UNDO - 1)), entry];
-    setUndoCount(undoStack.current.length);
-  }, []);
+  const loadUndo = useCallback(() => api.undoState(repo.path).then(setUndoState, () => undefined), [repo.path]);
+  useEffect(() => void loadUndo(), [loadUndo]);
 
   const undoRef = useRef<() => Promise<void>>(async () => undefined);
 
@@ -200,7 +200,13 @@ export function RepoProvider({ repo, active = true, children }: { repo: RepoInfo
           } catch {
             entry = null;
           }
-          if (entry) pushUndo(entry);
+          if (entry) {
+            try {
+              setUndoState(await api.undoPush(repo.path, entry.label, entry.spec));
+            } catch {
+              entry = null;
+            }
+          }
         }
         if (cr && typeof cr === 'object' && 'conflicts' in cr && cr.conflicts) {
           ui.toast('warning', 'Conflicts need to be resolved', 'Resolve the conflicted files in the Working Copy, then continue.');
@@ -219,22 +225,29 @@ export function RepoProvider({ repo, active = true, children }: { repo: RepoInfo
         if (!opts.noRefresh) await load(true);
       }
     },
-    [load, ui, pushUndo],
+    [load, ui, repo.path, setView],
   );
 
   const undo = useCallback(async () => {
-    const entry = undoStack.current.pop();
-    setUndoCount(undoStack.current.length);
-    if (!entry) {
+    const state = await api.undoState(repo.path).catch(() => null);
+    if (state) setUndoState(state);
+    if (!state?.top) {
       ui.toast('info', 'Nothing to undo');
       return;
     }
-    await run(`Undoing ${entry.label}…`, entry.run, { success: `Undid ${entry.label}` });
-  }, [run, ui]);
+    const result = await run(`Undoing ${state.top.label}…`, () => api.undoRun(repo.path), { success: (r) => `Undid ${r.label}` });
+    if (result?.restoreMessage) {
+      // Saved first so the composer picks it up even if it isn't mounted right now.
+      saveDraft(repo.path, draftFromMessage(result.restoreMessage));
+      window.dispatchEvent(new CustomEvent('gitcolumn:restore-message', { detail: { repo: repo.path, message: result.restoreMessage } }));
+    }
+    await loadUndo();
+  }, [run, ui, repo.path, loadUndo]);
   undoRef.current = undo;
 
   const currentBranch = useMemo(() => refs.find((r) => r.type === 'head' && r.current), [refs]);
-  const canUndo = undoCount > 0;
+  const canUndo = undoState.count > 0;
+  const undoLabel = undoState.top?.label ?? null;
 
   const value = useMemo<RepoCtx>(
     () => ({
@@ -262,6 +275,7 @@ export function RepoProvider({ repo, active = true, children }: { repo: RepoInfo
       run,
       undo,
       canUndo,
+      undoLabel,
     }),
     [
       repo,
@@ -288,6 +302,7 @@ export function RepoProvider({ repo, active = true, children }: { repo: RepoInfo
       run,
       undo,
       canUndo,
+      undoLabel,
     ],
   );
 

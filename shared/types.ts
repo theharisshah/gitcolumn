@@ -325,3 +325,37 @@ export interface ReflogEntry {
   authorDate: number;
   subject: string;
 }
+
+// ----------------------------------------------------- undo (persisted)
+
+export interface HeadPos {
+  head: string | null;
+  branch: string | null;
+}
+
+/** A serializable description of how to undo an operation; validated and executed by the backend. */
+export type UndoSpec =
+  | { kind: 'head-reset'; from: string; to: string; mode: 'keep' | 'soft'; index?: string | null; branch: string | null }
+  | { kind: 'commit'; from: string; to: string | null; branch: string | null; message: string }
+  | { kind: 'index'; tree: string; head: string | null }
+  | { kind: 'files'; snapshot: Snapshot }
+  | { kind: 'refs'; updates: { ref: string; old: string | null; new: string | null }[]; config?: [string, string | null][] }
+  | { kind: 'checkout'; from: HeadPos; to: HeadPos; deleteBranch?: { name: string; hash: string } }
+  | { kind: 'branch-rename'; from: string; to: string; hash: string }
+  | { kind: 'upstream'; branch: string; previous: string | null }
+  | { kind: 'stash-save'; hash: string }
+  | { kind: 'stash-apply'; snapshot: Snapshot; restore?: { hash: string; message: string } }
+  | { kind: 'stash-drop'; hash: string; message: string }
+  | { kind: 'remote-add'; name: string }
+  | { kind: 'remote-remove'; name: string; url: string };
+
+export interface UndoState {
+  count: number;
+  top: { id: string; label: string; createdAt: number } | null;
+}
+
+export interface UndoResult {
+  label: string;
+  /** For undone commits: the message to put back into the composer */
+  restoreMessage?: string;
+}

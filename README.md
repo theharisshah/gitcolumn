@@ -64,7 +64,7 @@ to full signing with the hardened runtime automatically when a certificate is pr
   blame with syntax highlighting, age colouring and *Blame Previous Revision*.
 - **Undo (⌘Z)** — staging, discards (including untracked files), commits, amends, checkouts,
   branch create/delete/rename, merges, rebases, cherry-picks, reverts, resets, stashes and tags.
-  Success toasts carry an **Undo** button.
+  Success toasts carry an **Undo** button, and the undo history survives restarts.
 - **Branches, remotes, tags, submodules** in a filterable sidebar with context menus: checkout,
   merge, rebase, push / force-push (with lease), track upstream, rename, delete, open a submodule
   in its own tab, initialize/update submodules.
@@ -111,13 +111,15 @@ The renderer calls `window.gitcolumn.invoke(method, args)` in Electron and falls
 `POST /api/<method>` in browser mode, so the same UI runs in both.
 
 Undo works by snapshotting before an operation: the index is saved with `git write-tree`, working
-tree files with `git hash-object -w`, and refs by hash. Undo restores exactly that state, and
-refuses if the repository moved on in the meantime. The undo history lives in memory per window.
+tree files with `git hash-object -w`, and refs by hash. Each undo step is stored as data (not code)
+in `.git/gitcolumn/undo.json` (per worktree, last 30 steps, 7 days). Undo restores exactly that
+state and refuses if the repository moved on in the meantime; ref changes are applied in one
+compare-and-swap transaction (`git update-ref --stdin`).
 
 ## Known limitations
 
 - Git LFS management needs `git-lfs` installed; without it LFS files show as pointer files.
 - Interactive rebase refuses ranges containing merge commits (it would flatten them).
-- Undo history is not persisted across restarts; pushes and other remote changes can't be undone.
+- Pushes and other remote changes can't be undone.
 - Windows and Linux installers build cleanly (locally on macOS and in CI) but have only been
   exercised on macOS so far.

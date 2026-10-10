@@ -42,7 +42,7 @@ export function formatShortcut(shortcut: string, mac = navigator.platform.toLowe
 export function useCommands(extra: { openPalette?: () => void } = {}): Command[] {
   const ctx = useRepo();
   const actions = useActions();
-  const { setView, back, forward, canGoBack, canGoForward, refresh, status, stashes, repo, undo } = ctx;
+  const { setView, back, forward, canGoBack, canGoForward, refresh, status, stashes, repo, undo, undoLabel } = ctx;
   const { openPalette } = extra;
 
   return useMemo(() => {
@@ -71,7 +71,7 @@ export function useCommands(extra: { openPalette?: () => void } = {}): Command[]
       { id: 'tag.new', title: 'New Tag…', group: 'Branch', enabled: !!status?.head, run: () => void actions.createTag() },
       { id: 'stash.save', title: 'Stash Changes…', group: 'Stash', shortcut: 'mod+shift+s', menu: true, enabled: !!status?.files.length, run: () => void actions.stashSave() },
       { id: 'stash.pop', title: 'Pop Latest Stash', group: 'Stash', enabled: stashes.length > 0, run: () => stashes[0] && void actions.stashApply(stashes[0], true) },
-      { id: 'edit.undo', title: 'Undo', group: 'Edit', shortcut: 'mod+z', menu: true, run: () => void undo() },
+      { id: 'edit.undo', title: undoLabel ? `Undo ${undoLabel}` : 'Undo', group: 'Edit', shortcut: 'mod+z', menu: true, run: () => void undo() },
     ];
     if (openPalette) {
       list.push({ id: 'palette.open', title: 'Quick Actions…', group: 'Navigate', shortcut: 'mod+shift+a', menu: true, run: openPalette });
@@ -82,5 +82,5 @@ export function useCommands(extra: { openPalette?: () => void } = {}): Command[]
       list.push({ id: 'op.abort', title: 'Abort Merge/Rebase…', group: 'Repository', run: () => void actions.abortOp() });
     }
     return list;
-  }, [setView, back, forward, canGoBack, canGoForward, refresh, status, stashes, repo.path, undo, actions, openPalette]);
+  }, [setView, back, forward, canGoBack, canGoForward, refresh, status, stashes, repo.path, undo, undoLabel, actions, openPalette]);
 }

@@ -1,13 +1,11 @@
 import { useMemo } from 'react';
-import type { Commit, FileDiff, FileStatus, LineSelection, PatchAction, RebaseStep, Ref, Snapshot, Stash } from '../../shared/types';
+import type { Commit, FileDiff, FileStatus, HeadPos, LineSelection, PatchAction, RebaseStep, Ref, Snapshot, Stash } from '../../shared/types';
 import { RebaseDialog } from '../components/RebaseDialog';
 import { api } from '../lib/api';
 import { plural, shortHash } from '../lib/format';
 import { getSetting } from '../lib/settings';
 import { useUI } from '../ui/UIProvider';
 import { useRepo, type UndoEntry } from './RepoContext';
-
-const STALE = 'The repository changed since then, so this can no longer be undone.';
 
 /** High-level git operations with their confirmation dialogs and undo, shared by toolbar, sidebar and menus. */
 export function useActions() {
@@ -21,30 +19,39 @@ export function useActions() {
     const localExists = (name: string) => refs.some((r) => r.type === 'head' && r.name === name);
     const pathsOf = (files: FileStatus[]) => files.flatMap((f) => (f.origPath ? [f.path, f.origPath] : [f.path]));
 
-    // ------------------------------------------------------------ undo helpers
+    // ------------------------------------------------------------ undo specs
+    // Undo entries are data (see UndoSpec), checked and executed by the backend, so they survive restarts.
     const currentHead = () => api.revParse(path, 'HEAD');
-    const expectHead = async (expected: string | null) => {
-      if ((await currentHead()) !== expected) throw new Error(STALE);
+    const currentPos = async (): Promise<HeadPos> => {
+      const s = await api.snapshot(path);
+      return { head: s.head, branch: s.branch };
     };
     /** Undo an operation that moved HEAD (merge, rebase, pull, cherry-pick…) by resetting back, keeping local changes. */
     const undoHeadMove = (label: string, before: Snapshot) => async (): Promise<UndoEntry | null> => {
       const after = await currentHead();
-      if (!before.head || after === before.head) return null;
-      return {
-        label,
-        run: async () => {
-          await expectHead(after);
-          await api.reset(path, before.head!, 'keep');
-        },
-      };
+      if (!before.head || !after || after === before.head) return null;
+      return { label, spec: { kind: 'head-reset', from: after, to: before.head, mode: 'keep', branch: before.branch } };
     };
     /** Undo an index-only change (stage / unstage) by restoring the previous index tree. */
     const undoIndex = (label: string, before: Snapshot) => (): UndoEntry | null =>
-      before.index ? { label, run: () => api.restoreSnapshot(path, { ...before, files: undefined }) } : null;
-    /** Return to the branch (or detached commit) that was checked out before. */
-    const switchBack = async (before: Snapshot) => {
-      if (before.branch) await api.checkout(path, before.branch);
-      else if (before.head) await api.checkoutDetached(path, before.head);
+      before.index ? { label, spec: { kind: 'index', tree: before.index, head: before.head } } : null;
+    /** Return to the branch (or detached commit) that was checked out before, optionally deleting a branch the operation created. */
+    const undoCheckout = (before: Snapshot, created?: string) => async (): Promise<UndoEntry | null> => {
+      const to = await currentPos();
+      if (to.head === before.head && to.branch === before.branch) return null;
+      const hash = created ? await api.revParse(path, `refs/heads/${created}`) : null;
+      return {
+        label: 'Checkout',
+        spec: { kind: 'checkout', from: { head: before.head, branch: before.branch }, to, deleteBranch: created && hash ? { name: created, hash } : undefined },
+      };
+    };
+    /** Delete a ref again (only if it still points where the operation left it), with its branch settings. */
+    const undoCreateRef = (label: string, ref: string) => async (): Promise<UndoEntry | null> => {
+      const hash = await api.revParse(path, ref);
+      if (!hash) return null;
+      const branch = ref.startsWith('refs/heads/') ? ref.slice('refs/heads/'.length) : null;
+      const config = branch ? (await api.branchConfig(path, branch)).map(([k]): [string, string | null] => [k, null]) : undefined;
+      return { label, spec: { kind: 'refs', updates: [{ ref, old: hash, new: null }], config } };
     };
 
     const actions = {
@@ -141,7 +148,7 @@ export function useActions() {
         const before = await api.snapshot(path, action === 'discard' ? [file] : undefined);
         const label = action === 'stage' ? 'Stage Lines' : action === 'unstage' ? 'Unstage Lines' : 'Discard Lines';
         return run(action === 'stage' ? 'Staging…' : action === 'unstage' ? 'Unstaging…' : 'Discarding…', () => api.applyPatch(path, diff, selection, action), {
-          undo: () => (action === 'discard' ? { label, run: () => api.restoreSnapshot(path, before) } : undoIndex(label, before)()),
+          undo: () => (action === 'discard' ? { label, spec: { kind: 'files', snapshot: before } } : undoIndex(label, before)()),
           success: action === 'discard' ? 'Changes discarded' : undefined,
         });
       },
@@ -152,7 +159,7 @@ export function useActions() {
         const ok = await ui.confirm({
           title: `Discard changes in ${files.length === 1 ? `"${files[0].path}"` : plural(files.length, 'file')}?`,
           message:
-            (untracked && window.gitcolumn ? 'Untracked files will be moved to the Trash. ' : '') + 'You can undo this with ⌘Z while GitColumn is open.',
+            (untracked && window.gitcolumn ? 'Untracked files will be moved to the Trash. ' : '') + 'You can undo this with ⌘Z.',
           confirmLabel: 'Discard',
           danger: true,
         });
@@ -160,7 +167,7 @@ export function useActions() {
         const before = await api.snapshot(path, pathsOf(files));
         return run('Discarding…', () => api.discard(path, files), {
           success: `Discarded ${files.length === 1 ? files[0].path : plural(files.length, 'file')}`,
-          undo: () => ({ label: 'Discard', run: () => api.restoreSnapshot(path, before) }),
+          undo: () => ({ label: 'Discard', spec: { kind: 'files', snapshot: before } }),
         });
       },
 
@@ -180,15 +187,8 @@ export function useActions() {
               // A soft reset can't restore MERGE_HEAD, so merge commits aren't undoable this way.
               if (opts.undoable === false) return null;
               const after = await currentHead();
-              return {
-                label: opts.amend ? 'Amend' : 'Commit',
-                run: async () => {
-                  await expectHead(after);
-                  if (before.head) await api.reset(path, before.head, 'soft');
-                  else if (before.branch) await api.deleteRef(path, `refs/heads/${before.branch}`);
-                  window.dispatchEvent(new CustomEvent('gitcolumn:restore-message', { detail: { repo: path, message } }));
-                },
-              };
+              if (!after || after === before.head) return null;
+              return { label: opts.amend ? 'Amend' : 'Commit', spec: { kind: 'commit', from: after, to: before.head, branch: before.branch, message } };
             },
           },
         );
@@ -215,35 +215,25 @@ export function useActions() {
         const before = await api.snapshot(path);
         return run('Creating branch…', () => api.createBranch(path, name, start, !!v.checkout), {
           success: v.checkout ? `Created and checked out ${name}` : `Created ${name}`,
-          undo: () => ({
-            label: 'Create Branch',
-            run: async () => {
-              if (v.checkout) await switchBack(before);
-              await api.deleteBranch(path, name, true);
-            },
-          }),
+          undo: async () => {
+            const entry = v.checkout ? await undoCheckout(before, name)() : await undoCreateRef('Create Branch', `refs/heads/${name}`)();
+            return entry && { ...entry, label: 'Create Branch' };
+          },
         });
       },
 
       async checkout(ref: Ref) {
         const before = await api.snapshot(path);
-        const back = () => ({ label: 'Checkout', run: () => switchBack(before) });
         if (ref.type === 'head') {
           if (ref.current) return;
-          return run(`Checking out ${ref.name}…`, () => api.checkout(path, ref.name), { success: `Checked out ${ref.name}`, undo: back });
+          return run(`Checking out ${ref.name}…`, () => api.checkout(path, ref.name), { success: `Checked out ${ref.name}`, undo: undoCheckout(before) });
         }
         if (ref.type === 'remote') {
           const local = ref.name.slice((ref.remote?.length ?? 0) + 1);
           const existed = localExists(local);
           return run(`Checking out ${local}…`, () => api.checkoutRemote(path, ref.name, local), {
             success: existed ? `Checked out ${local}` : `Created ${local} tracking ${ref.name}`,
-            undo: () => ({
-              label: 'Checkout',
-              run: async () => {
-                await switchBack(before);
-                if (!existed) await api.deleteBranch(path, local, true);
-              },
-            }),
+            undo: undoCheckout(before, existed ? undefined : local),
           });
         }
         return actions.checkoutDetached(ref.name, `tag ${ref.name}`);
@@ -259,7 +249,7 @@ export function useActions() {
         const before = await api.snapshot(path);
         return run('Checking out…', () => api.checkoutDetached(path, rev), {
           success: `Checked out ${label}`,
-          undo: () => ({ label: 'Checkout', run: () => switchBack(before) }),
+          undo: undoCheckout(before),
         });
       },
 
@@ -272,6 +262,7 @@ export function useActions() {
           danger: true,
         });
         if (!v) return;
+        const config = await api.branchConfig(path, ref.name).catch(() => [] as [string, string][]);
         let deleted = false;
         await run(
           `Deleting ${ref.name}…`,
@@ -302,9 +293,11 @@ export function useActions() {
               deleted
                 ? {
                     label: 'Delete Branch',
-                    run: async () => {
-                      await api.updateRef(path, ref.ref, ref.hash);
-                      if (ref.upstream && !v.remote) await api.setUpstream(path, ref.name, ref.upstream).catch(() => undefined);
+                    spec: {
+                      kind: 'refs',
+                      updates: [{ ref: ref.ref, old: null, new: ref.hash }],
+                      // The upstream is gone too when it was deleted on the remote.
+                      config: config.filter(([k]) => !(v.remote && /\.(remote|merge)$/.test(k))),
                     },
                   }
                 : null,
@@ -334,7 +327,7 @@ export function useActions() {
         if (!v || newName === ref.name) return;
         return run('Renaming branch…', () => api.renameBranch(path, ref.name, newName), {
           success: `Renamed ${ref.name} to ${newName}`,
-          undo: () => ({ label: 'Rename', run: () => api.renameBranch(path, newName, ref.name) }),
+          undo: () => ({ label: 'Rename', spec: { kind: 'branch-rename', from: ref.name, to: newName, hash: ref.hash } }),
         });
       },
 
@@ -356,7 +349,7 @@ export function useActions() {
         });
         if (!v) return;
         return run('Updating tracking…', () => api.setUpstream(path, ref.name, String(v.upstream) || null), {
-          undo: () => ({ label: 'Track Branch', run: () => api.setUpstream(path, ref.name, ref.upstream ?? null) }),
+          undo: () => ({ label: 'Track Branch', spec: { kind: 'upstream', branch: ref.name, previous: ref.upstream ?? null } }),
         });
       },
 
@@ -535,15 +528,7 @@ export function useActions() {
           success: 'Changes stashed',
           undo: async () => {
             const top = (await api.stashes(path))[0];
-            if (!top) return null;
-            return {
-              label: 'Stash',
-              run: async () => {
-                const now = (await api.stashes(path))[0];
-                if (now?.hash !== top.hash) throw new Error(STALE);
-                await api.stashApply(path, top.ref, true);
-              },
-            };
+            return top ? { label: 'Stash', spec: { kind: 'stash-save', hash: top.hash } } : null;
           },
         });
       },
@@ -559,10 +544,7 @@ export function useActions() {
               ? null
               : {
                   label: pop ? 'Pop Stash' : 'Apply Stash',
-                  run: async () => {
-                    await api.restoreSnapshot(path, before);
-                    if (pop) await api.stashStore(path, s.hash, s.message);
-                  },
+                  spec: { kind: 'stash-apply', snapshot: before, restore: pop ? { hash: s.hash, message: s.message } : undefined },
                 },
         });
       },
@@ -577,7 +559,7 @@ export function useActions() {
         if (!ok) return;
         return run('Deleting stash…', () => api.stashDrop(path, s.ref), {
           success: 'Stash deleted',
-          undo: () => ({ label: 'Delete Stash', run: () => api.stashStore(path, s.hash, s.message) }),
+          undo: () => ({ label: 'Delete Stash', spec: { kind: 'stash-drop', hash: s.hash, message: s.message } }),
         });
       },
 
@@ -608,7 +590,7 @@ export function useActions() {
           },
           {
             success: `Created tag ${name}`,
-            undo: () => (v.push ? null : { label: 'Create Tag', run: () => api.deleteTag(path, name) }),
+            undo: () => (v.push ? null : undoCreateRef('Create Tag', `refs/tags/${name}`)()),
           },
         );
       },
@@ -630,7 +612,7 @@ export function useActions() {
           },
           {
             success: `Deleted tag ${name}`,
-            undo: () => (object && !v.remote ? { label: 'Delete Tag', run: () => api.updateRef(path, `refs/tags/${name}`, object) } : null),
+            undo: () => (object && !v.remote ? { label: 'Delete Tag', spec: { kind: 'refs', updates: [{ ref: `refs/tags/${name}`, old: null, new: object }] } } : null),
           },
         );
       },
@@ -699,17 +681,14 @@ export function useActions() {
           success: `Reset ${headName} to ${shortHash(c.hash)}`,
           undo: async () => {
             const after = await currentHead();
-            if (!before.head) return null;
+            if (!before.head || !after) return null;
+            // A hard reset discarded the local changes for good; for the others, the old index comes back too.
             return {
               label: 'Reset',
-              run: async () => {
-                await expectHead(after);
-                if (mode === 'hard') await api.reset(path, before.head!, 'keep');
-                else {
-                  await api.reset(path, before.head!, 'soft');
-                  await api.restoreSnapshot(path, { ...before, files: undefined });
-                }
-              },
+              spec:
+                mode === 'hard'
+                  ? { kind: 'head-reset', from: after, to: before.head, mode: 'keep', branch: before.branch }
+                  : { kind: 'head-reset', from: after, to: before.head, mode: 'soft', index: before.index, branch: before.branch },
             };
           },
         });
@@ -723,15 +702,10 @@ export function useActions() {
           confirmLabel: 'Undo Commit',
         });
         if (!ok) return;
+        const branch = status?.branch ?? null;
         return run('Undoing commit…', () => api.reset(path, c.parents[0], 'soft'), {
           success: 'Commit undone — changes are staged',
-          undo: () => ({
-            label: 'Undo Commit',
-            run: async () => {
-              await expectHead(c.parents[0]);
-              await api.reset(path, c.hash, 'soft');
-            },
-          }),
+          undo: () => ({ label: 'Undo Commit', spec: { kind: 'head-reset', from: c.parents[0], to: c.hash, mode: 'soft', branch } }),
         });
       },
 
@@ -754,7 +728,7 @@ export function useActions() {
             await api.fetch(path, name).catch(() => undefined);
             return true;
           },
-          { success: `Added remote ${name}`, undo: () => ({ label: 'Add Remote', run: () => api.removeRemote(path, name) }) },
+          { success: `Added remote ${name}`, undo: () => ({ label: 'Add Remote', spec: { kind: 'remote-add', name } }) },
         );
         return !!res;
       },
@@ -770,7 +744,7 @@ export function useActions() {
         if (!ok) return;
         return run('Removing remote…', () => api.removeRemote(path, name), {
           success: `Removed remote ${name}`,
-          undo: () => (url ? { label: 'Remove Remote', run: () => api.addRemote(path, name, url) } : null),
+          undo: () => (url ? { label: 'Remove Remote', spec: { kind: 'remote-remove', name, url } } : null),
         });
       },
 
