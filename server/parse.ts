@@ -166,21 +166,22 @@ export function parseRefs(raw: string): Ref[] {
 // git log
 // ---------------------------------------------------------------------------
 
-export const LOG_FORMAT = ['%H', '%P', '%an', '%ae', '%at', '%s', '%ct'].join('%x1f') + '%x1e';
+// The subject goes last: it is the only free-text field, so anything in it can't shift the others.
+export const LOG_FORMAT = ['%H', '%P', '%an', '%ae', '%at', '%ct', '%s'].join('%x1f') + '%x1e';
 
 export function parseLog(raw: string): Commit[] {
   const commits: Commit[] = [];
   for (const rec of raw.split(RS)) {
     const r = rec.replace(/^\n/, '');
     if (!r) continue;
-    const [hash, parents, author, email, date, subject, committed] = r.split(FS);
+    const [hash, parents, author, email, date, committed, ...subject] = r.split(FS);
     commits.push({
       hash,
       parents: parents ? parents.split(' ') : [],
       author,
       email,
       date: Number(date),
-      subject: subject ?? '',
+      subject: subject.join(FS),
       committerDate: committed ? Number(committed) : undefined,
     });
   }

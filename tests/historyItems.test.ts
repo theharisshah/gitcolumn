@@ -16,11 +16,22 @@ describe('history items', () => {
     );
   });
 
-  test('sections never move forward in time (topological order, clock skew)', () => {
-    // b was committed in a later month than a's section; it stays in the September section.
-    const commits = [c('a', at(2026, 8)), c('b', at(2026, 9)), c('c', at(2026, 7))];
+  test('an older commit listed above newer ones joins their section (topological order)', () => {
+    // A merged branch's March commit comes before October mainline commits: it must not drag them into March.
+    const commits = [c('merge', at(2026, 9, 20)), c('old-branch', at(2026, 2)), c('main-1', at(2026, 9, 10)), c('main-2', at(2026, 9, 1)), c('sept', at(2026, 8))];
     const items = historyItems(commits, { headers: true, locale: 'en-US' });
-    assert.deepEqual(items.map((i) => (i.kind === 'header' ? i.label : i.index)), ['September 2026', 0, 1, 'August 2026', 2]);
+    assert.deepEqual(items.map((i) => (i.kind === 'header' ? i.label : i.index)), ['October 2026', 0, 1, 2, 3, 'September 2026', 4]);
+  });
+
+  test('sections only move back in time; future dates count as now', () => {
+    const now = at(2026, 9, 10);
+    const commits = [c('a', at(2026, 8)), c('b', at(2026, 9)), c('skewed', at(2031, 0)), c('c', at(2026, 7))];
+    const items = historyItems(commits, { headers: true, locale: 'en-US', now });
+    assert.deepEqual(items.map((i) => (i.kind === 'header' ? i.label : i.index)), ['October 2026', 0, 1, 2, 'August 2026', 3]);
+  });
+
+  test('labels use Gregorian months in every locale', () => {
+    assert.match(monthLabel(monthOf(at(2026, 9)), 'fa-IR'), /۲۰۲۶|2026/);
   });
 
   test('uses the committer date, falling back to the author date', () => {

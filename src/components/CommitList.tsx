@@ -91,6 +91,10 @@ export function CommitList({ commits, graph, maxLanes, badges, head, selected, o
     [maxLanes, roundedWidth, preferredWidth, laneOffset, rowH],
   );
   const graphWidth = geometry?.width ?? 10;
+  // Keep the stored offset within range (the geometry clamps it), so ← and ◀ respond right away.
+  useEffect(() => {
+    if (geometry && geometry.offset !== laneOffset) setLaneOffset(geometry.offset);
+  }, [geometry, laneOffset]);
   const lanesHidden = !!geometry && maxLanes > geometry.visible;
 
   const items = useMemo(() => historyItems(commits, { headers: monthHeaders }), [commits, monthHeaders]);

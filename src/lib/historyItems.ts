@@ -10,21 +10,30 @@ export function monthOf(unix: number): number {
 }
 
 export function monthLabel(month: number, locale?: string): string {
-  return new Date(Math.floor(month / 12), month % 12, 1).toLocaleString(locale, { month: 'long', year: 'numeric' });
+  // Grouping uses Gregorian months, so the label does too (whatever the locale's default calendar).
+  return new Intl.DateTimeFormat(locale, { month: 'long', year: 'numeric', calendar: 'gregory' }).format(new Date(Math.floor(month / 12), month % 12, 1));
 }
 
 /**
- * Interleave month headers with a newest-first commit list. Topological order and clock skew mean
- * dates aren't monotonic, so sections only ever move back in time: a commit dated later than the
- * current section stays in it rather than starting a section for a later month.
+ * Interleave month headers with a newest-first commit list. Topological order puts a merged
+ * branch's older commits above newer mainline commits, so a commit's section is the newest date at
+ * or below it in the list: old commits fold into the section around them, and sections still only
+ * move back in time. Dates in the future (clock skew) count as "now".
  */
-export function historyItems(commits: Commit[], opts: { headers: boolean; locale?: string }): HistoryItem[] {
+export function historyItems(commits: Commit[], opts: { headers: boolean; locale?: string; now?: number }): HistoryItem[] {
   if (!opts.headers) return commits.map((_, index) => ({ kind: 'commit', index }));
+  const limit = (opts.now ?? Date.now() / 1000) + 86400;
+  const section = new Array<number>(commits.length);
+  let newest = -Infinity;
+  for (let i = commits.length - 1; i >= 0; i--) {
+    newest = Math.max(newest, Math.min(limit, commits[i].committerDate ?? commits[i].date));
+    section[i] = monthOf(newest);
+  }
   const items: HistoryItem[] = [];
   let current = Infinity;
-  commits.forEach((c, index) => {
-    const month = monthOf(c.committerDate ?? c.date);
-    if (month < current) {
+  commits.forEach((_, index) => {
+    const month = section[index];
+    if (month !== current) {
       current = month;
       items.push({ kind: 'header', key: `month:${month}:${index}`, label: monthLabel(month, opts.locale), month });
     }
