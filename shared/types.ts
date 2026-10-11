@@ -298,12 +298,24 @@ export interface RebaseStep {
 export interface RebasePlanCommit extends Commit {
   body: string;
   pushed: boolean;
+  /** On the branch's first-parent line (false: on a side branch that a merge brings in) */
+  mainline: boolean;
+}
+
+export interface RebaseMergeCheck {
+  hash: string;
+  /** git can't recreate it without conflicts (they were resolved by hand originally) */
+  conflicts: boolean;
+  /** It contains changes beyond merging its parents; recreating it would lose them */
+  evil: boolean;
 }
 
 export interface RebasePlan {
   base: string | null;
   commits: RebasePlanCommit[];
   hasMerges: boolean;
+  /** For ranges with merges: whether each merge can be recreated as it was */
+  merges?: RebaseMergeCheck[];
 }
 
 // -------------------------------------------------------------------- undo

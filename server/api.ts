@@ -55,6 +55,7 @@ import { reflogApi } from './reflog.ts';
 import { undoApi } from './undo.ts';
 import { ignoreApi } from './ignore.ts';
 import { annotateRefs, branchesApi } from './branches.ts';
+import { checkMerges, rebaseWithMerges } from './rebase.ts';
 import type { ApiCtx, HandlerModule } from './ctx.ts';
 import {
   assertHash,
@@ -904,12 +905,14 @@ export function createApi(host: Host): Record<string, Handler> {
       }
       const range = base ? `${base}..HEAD` : 'HEAD';
       const fmt = ['%H', '%P', '%an', '%ae', '%at', '%s', '%b'].join('%x1f') + '%x1e';
-      const [raw, unpushedRaw, baseHash] = await Promise.all([
+      const [raw, unpushedRaw, baseHash, firstParent] = await Promise.all([
         git(repo, ['log', '--reverse', '--topo-order', `--format=${fmt}`, range, '--']),
         git(repo, ['rev-list', range, '--not', '--remotes']),
         base ? git(repo, ['rev-parse', '--verify', `${base}^{commit}`]).then((h) => h.trim()) : Promise.resolve(null),
+        git(repo, ['rev-list', '--first-parent', range]),
       ]);
       const unpushed = new Set(unpushedRaw.split('\n').filter(Boolean));
+      const mainline = new Set(firstParent.split('\n').filter(Boolean));
       const commits: RebasePlanCommit[] = raw
         .split(RS)
         .map((r) => r.replace(/^\n/, ''))
@@ -925,9 +928,12 @@ export function createApi(host: Host): Record<string, Handler> {
             subject: subject ?? '',
             body: body.join(FS).trim(),
             pushed: !unpushed.has(hash),
+            mainline: mainline.has(hash),
           };
         });
-      return { base: baseHash, commits, hasMerges: commits.some((c) => c.parents.length > 1) };
+      const plan: RebasePlan = { base: baseHash, commits, hasMerges: commits.some((c) => c.parents.length > 1) };
+      if (plan.hasMerges) plan.merges = await checkMerges(repo, plan);
+      return plan;
     },
 
     async 'rebase.interactive'({ repo, base, steps }: { repo: string; base: string | null; steps: RebaseStep[] }) {
@@ -943,7 +949,17 @@ export function createApi(host: Host): Record<string, Handler> {
       }
       const plan = (await api['rebase.plan']({ repo, base })) as RebasePlan;
       if (plan.hasMerges) {
-        throw new Error('This range contains merge commits, which interactive rebase would flatten. Start from a more recent commit.');
+        if (steps.every((s, i) => s.action === 'pick' && s.hash === plan.commits[i]?.hash)) return { conflicts: false, paused: false };
+        // Recreates the merges (git rebase --rebase-merges) instead of flattening them.
+        return rebaseWithMerges({
+          repo,
+          base,
+          steps,
+          plan,
+          gitDir: await gitDir(repo),
+          withConflicts: (run) => withConflicts(repo, run),
+          isRebasing: async () => (await repoState(repo)).rebasing,
+        });
       }
       const planned = new Set(plan.commits.map((c) => c.hash));
       if (steps.length !== plan.commits.length || !steps.every((s) => planned.has(s.hash))) {

@@ -1,5 +1,6 @@
-import { ArrowDown, ArrowUp, GripVertical } from 'lucide-react';
+import { ArrowDown, ArrowUp, GitMerge, GripVertical } from 'lucide-react';
 import { useMemo, useState } from 'react';
+import { affectedMerges } from '../../shared/rebase';
 import type { RebaseAction, RebasePlan, RebaseStep } from '../../shared/types';
 import { shortHash } from '../lib/format';
 
@@ -16,6 +17,8 @@ interface Row extends RebaseStep {
   subject: string;
   body: string;
   pushed: boolean;
+  merge: boolean;
+  mainline: boolean;
 }
 
 export function RebaseDialog({
@@ -33,10 +36,20 @@ export function RebaseDialog({
   const [rows, setRows] = useState<Row[]>(() =>
     initial.map((s) => {
       const c = byHash.get(s.hash)!;
-      return { ...s, subject: c.subject, body: c.body, pushed: c.pushed, message: s.message ?? (c.body ? `${c.subject}\n\n${c.body}` : c.subject) };
+      return {
+        ...s,
+        subject: c.subject,
+        body: c.body,
+        pushed: c.pushed,
+        merge: c.parents.length > 1,
+        mainline: c.mainline !== false,
+        message: s.message ?? (c.body ? `${c.subject}\n\n${c.body}` : c.subject),
+      };
     }),
   );
   const [dragIndex, setDragIndex] = useState<number | null>(null);
+  // With merges, git recreates them (--rebase-merges): the order is fixed and merges are kept.
+  const mergesMode = plan.hasMerges;
   const [overIndex, setOverIndex] = useState<number | null>(null);
 
   const update = (i: number, patch: Partial<Row>) => setRows((r) => r.map((row, j) => (j === i ? { ...row, ...patch } : row)));
@@ -54,6 +67,13 @@ export function RebaseDialog({
   if (!firstKept) error = 'Keep at least one commit.';
   else if (firstKept.action === 'squash' || firstKept.action === 'fixup') error = 'The first kept commit can’t be squashed — there is nothing above it to combine with.';
   else if (rows.some((r) => r.action === 'reword' && !r.message?.trim())) error = 'Reworded commits need a message.';
+  const recreated = mergesMode ? affectedMerges(plan, rows) : new Set<string>();
+  const checks = new Map((plan.merges ?? []).map((m) => [m.hash, m]));
+  const evil = [...recreated].filter((h) => checks.get(h)?.evil);
+  const conflicting = [...recreated].filter((h) => checks.get(h)?.conflicts);
+  if (!error && evil.length) {
+    error = `The merge ${shortHash(evil[0])} contains changes of its own, which recreating it would lose. Only change commits above it.`;
+  }
 
   const changed = rows.some((r, i) => r.action !== 'pick' || r.hash !== plan.commits[i].hash);
   const pushed = rows.some((r) => r.pushed && (r.action !== 'pick' || rows.indexOf(r) !== plan.commits.findIndex((c) => c.hash === r.hash)));
@@ -82,14 +102,17 @@ export function RebaseDialog({
             on top of <span className="mono">{shortHash(plan.base)}</span>
           </>
         )}
-        . Commits are applied top to bottom — drag to reorder.
+        .{' '}
+        {mergesMode
+          ? 'This range contains merges: they are recreated as they are, so commits keep their order here.'
+          : 'Commits are applied top to bottom — drag to reorder.'}
       </div>
       <div className="rebase-list">
         {rows.map((row, i) => (
           <div
             key={row.hash}
-            className={`rebase-row action-${row.action} ${dragIndex === i ? 'dragging' : ''} ${overIndex === i && dragIndex !== i ? 'drop-target' : ''}`}
-            draggable
+            className={`rebase-row action-${row.action} ${row.merge ? 'rebase-merge' : ''} ${!row.mainline ? 'rebase-side' : ''} ${dragIndex === i ? 'dragging' : ''} ${overIndex === i && dragIndex !== i ? 'drop-target' : ''}`}
+            draggable={!mergesMode}
             onDragStart={(e) => {
               setDragIndex(i);
               e.dataTransfer.effectAllowed = 'move';
@@ -109,21 +132,29 @@ export function RebaseDialog({
               setOverIndex(null);
             }}
           >
-            <span className="rebase-grip" title="Drag to reorder">
-              <GripVertical size={14} />
-            </span>
-            <select
-              className="input rebase-action"
-              value={row.action}
-              title={ACTIONS.find((a) => a.value === row.action)?.hint}
-              onChange={(e) => update(i, { action: e.target.value as RebaseAction })}
-            >
-              {ACTIONS.map((a) => (
-                <option key={a.value} value={a.value} title={a.hint}>
-                  {a.label}
-                </option>
-              ))}
-            </select>
+            {!mergesMode && (
+              <span className="rebase-grip" title="Drag to reorder">
+                <GripVertical size={14} />
+              </span>
+            )}
+            {row.merge ? (
+              <span className="rebase-action rebase-keep" title={recreated.has(row.hash) ? 'Recreated on top of the rewritten commits' : 'Kept as it is'}>
+                <GitMerge size={12} /> {recreated.has(row.hash) ? 'Remerge' : 'Keep'}
+              </span>
+            ) : (
+              <select
+                className="input rebase-action"
+                value={row.action}
+                title={ACTIONS.find((a) => a.value === row.action)?.hint}
+                onChange={(e) => update(i, { action: e.target.value as RebaseAction })}
+              >
+                {ACTIONS.map((a) => (
+                  <option key={a.value} value={a.value} title={a.hint}>
+                    {a.label}
+                  </option>
+                ))}
+              </select>
+            )}
             <span className="mono rebase-hash">{shortHash(row.hash)}</span>
             <div className="rebase-text">
               {row.action === 'reword' ? (
@@ -149,14 +180,16 @@ export function RebaseDialog({
                 pushed
               </span>
             )}
-            <span className="rebase-move">
-              <button className="icon-button" disabled={i === 0} onClick={() => move(i, i - 1)} title="Move up">
-                <ArrowUp size={12} />
-              </button>
-              <button className="icon-button" disabled={i === rows.length - 1} onClick={() => move(i, i + 1)} title="Move down">
-                <ArrowDown size={12} />
-              </button>
-            </span>
+            {!mergesMode && (
+              <span className="rebase-move">
+                <button className="icon-button" disabled={i === 0} onClick={() => move(i, i - 1)} title="Move up">
+                  <ArrowUp size={12} />
+                </button>
+                <button className="icon-button" disabled={i === rows.length - 1} onClick={() => move(i, i + 1)} title="Move down">
+                  <ArrowDown size={12} />
+                </button>
+              </span>
+            )}
           </div>
         ))}
       </div>
@@ -172,6 +205,11 @@ export function RebaseDialog({
               .join(' · ') || 'Ready'
           : 'No changes yet'}
       </div>
+      {conflicting.length > 0 && !evil.length && (
+        <div className="rebase-warning">
+          {conflicting.length === 1 ? `The merge ${shortHash(conflicting[0])} needed` : `${conflicting.length} merges needed`} conflicts resolved by hand. The rebase will stop there so you can resolve them again.
+        </div>
+      )}
       {pushed && (
         <div className="rebase-warning">
           Some of these commits are already on a remote. After rewriting them you’ll need to force push, which affects anyone who pulled them.

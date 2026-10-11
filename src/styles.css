@@ -2876,3 +2876,20 @@ textarea.input {
 .commit-scroll:focus .commit-row.selected .commit-meta-line {
   color: rgba(255, 255, 255, 0.8);
 }
+
+/* Interactive rebase across merges */
+.rebase-row.rebase-side {
+  padding-left: 22px;
+  box-shadow: inset 3px 0 0 var(--border-strong);
+}
+.rebase-row.rebase-merge .rebase-subject {
+  color: var(--text-muted);
+}
+.rebase-keep {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-muted);
+  padding: 0 8px;
+}

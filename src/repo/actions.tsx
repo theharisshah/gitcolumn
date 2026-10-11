@@ -430,9 +430,6 @@ export function useActions() {
           return ui.toast('error', 'Can’t start interactive rebase', e instanceof Error ? e.message : String(e));
         }
         if (!plan.commits.length) return ui.toast('info', 'There are no commits after this one to rebase');
-        if (plan.hasMerges) {
-          return ui.toast('warning', 'This range contains merge commits', 'Interactive rebase would flatten them. Start from a commit after the most recent merge.');
-        }
         const initial = plan.commits.map((c): RebaseStep => ({ action: 'pick', hash: c.hash }));
         const steps = await ui.modal<RebaseStep[]>((close) => (
           <RebaseDialog branch={status.branch!} plan={plan} initial={preset ? preset(initial) : initial} onClose={close} />
@@ -481,7 +478,6 @@ export function useActions() {
           return null;
         });
         if (!plan) return;
-        if (plan.hasMerges) return ui.toast('warning', 'Can’t edit this commit', 'There are merge commits after it.');
         return actions.runRebase(
           plan.base,
           plan.commits.map((pc) => (pc.hash === c.hash ? { action: 'reword', hash: pc.hash, message } : { action: 'pick', hash: pc.hash })),
@@ -496,7 +492,6 @@ export function useActions() {
         if (!grand) return ui.toast('warning', 'Squashing into the root commit isn’t supported');
         const plan = await api.rebasePlan(path, grand).catch(() => null);
         if (!plan) return ui.toast('error', 'That commit is not on the current branch');
-        if (plan.hasMerges) return ui.toast('warning', 'Can’t squash here', 'There are merge commits in the way.');
         const ok = await ui.confirm({
           title: mode === 'squash' ? 'Squash into parent?' : 'Fixup into parent?',
           message:
@@ -517,7 +512,6 @@ export function useActions() {
         const parent = c.parents[0];
         const plan = await api.rebasePlan(path, parent ?? null).catch(() => null);
         if (!plan) return ui.toast('error', 'That commit is not on the current branch');
-        if (plan.hasMerges) return ui.toast('warning', 'Can’t drop this commit', 'There are merge commits after it.');
         if (plan.commits.length === 1 && !parent) return ui.toast('warning', 'Can’t drop the only commit');
         const ok = await ui.confirm({
           title: 'Drop commit?',
