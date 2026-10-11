@@ -43,14 +43,23 @@ function badgeWidth(b: BadgeRef): number {
   return 2 + 12 + 10 + 3 + Math.ceil(b.label.length * 6.4) + (b.synced ? 13 : 0);
 }
 
-export function RefBadges({ badges, onContextMenu }: { badges?: BadgeRef[]; onContextMenu?: (e: React.MouseEvent, b: BadgeRef) => void }) {
+export function RefBadges({
+  badges,
+  onContextMenu,
+  fit,
+}: {
+  badges?: BadgeRef[];
+  onContextMenu?: (e: React.MouseEvent, b: BadgeRef) => void;
+  /** In single-line rows: shrink to the badges that fit. The value re-runs the fit when the space around changes (e.g. graph width). */
+  fit?: number;
+}) {
   const strip = useRef<HTMLSpanElement>(null);
   // Badges that don't fit wrap onto a hidden second line, but a wrapped flex box keeps its unwrapped
   // width. Shrink the strip to the badges actually shown, so the subject follows right after them.
   useLayoutEffect(() => {
     const el = strip.current;
-    if (!el || !el.parentElement) return;
-    const fit = () => {
+    if (fit === undefined || !el || !el.parentElement) return;
+    const fitNow = () => {
       el.style.maxWidth = '';
       const box = el.getBoundingClientRect();
       const kids = [...el.children].map((c) => c.getBoundingClientRect());
@@ -58,11 +67,11 @@ export function RefBadges({ badges, onContextMenu }: { badges?: BadgeRef[]; onCo
       const right = Math.max(...kids.filter((k) => Math.abs(k.top - kids[0].top) < 2).map((k) => k.right));
       if (right < box.right - 1) el.style.maxWidth = `${Math.ceil(right - box.left)}px`;
     };
-    fit();
-    const ro = new ResizeObserver(fit);
+    fitNow();
+    const ro = new ResizeObserver(fitNow);
     ro.observe(el.parentElement);
     return () => ro.disconnect();
-  }, [badges]);
+  }, [badges, fit]);
   if (!badges?.length) return null;
   // When the row is tight the strip shrinks, but never below the first badge (up to 64px).
   const minWidth = Math.min(64, badgeWidth(badges[0]));

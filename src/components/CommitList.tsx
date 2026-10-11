@@ -36,7 +36,8 @@ function graphGeometry(maxLanes: number, listWidth: number, preferred: number | 
   const lanes = Math.min(maxLanes, GRAPH_LAYOUT_LANES);
   let visible: number;
   if (preferred) {
-    visible = Math.floor((preferred - x0 - 2) / laneW) + 1;
+    // A width saved in a wider window never takes more than 60% of the list.
+    visible = Math.floor((Math.min(preferred, Math.max(60, listWidth * 0.6)) - x0 - 2) / laneW) + 1;
   } else {
     // The graph may use up to about a quarter of the list so the subject always has room.
     visible = Math.min(AUTO_VISIBLE_LANES, Math.max(4, Math.floor((listWidth * 0.25 - 12) / laneW)));
@@ -118,6 +119,23 @@ export function CommitList({ commits, graph, maxLanes, badges, head, selected, o
     return () => ro.disconnect();
   }, []);
 
+  // When row heights change (compact <-> columns, month headers on/off), keep the same commit at the top.
+  const topCommit = useRef(0);
+  const lastLayout = useRef({ rowH, headers: monthHeaders });
+  useLayoutEffect(() => {
+    const el = scrollRef.current;
+    const changed = lastLayout.current.rowH !== rowH || lastLayout.current.headers !== monthHeaders;
+    lastLayout.current = { rowH, headers: monthHeaders };
+    if (!el || !changed || topCommit.current >= commits.length) return;
+    el.scrollTop = offsets[itemOfCommit[topCommit.current]];
+    setScrollTop(el.scrollTop);
+  }, [rowH, monthHeaders, offsets, itemOfCommit, commits.length]);
+  // Remember the top commit only while the layout is the one it was measured in.
+  if (lastLayout.current.rowH === rowH && lastLayout.current.headers === monthHeaders) {
+    const first = items[itemAt(offsets, scrollTop)];
+    if (first?.kind === 'commit') topCommit.current = first.index;
+  }
+
   const start = Math.max(0, itemAt(offsets, scrollTop) - 8);
   const end = Math.min(items.length, itemAt(offsets, scrollTop + height) + 9);
 
@@ -185,10 +203,16 @@ export function CommitList({ commits, graph, maxLanes, badges, head, selected, o
     const x0 = e.clientX;
     const w0 = graphWidth;
     const max = Math.max(60, listWidth * 0.6);
-    const move = (ev: MouseEvent) => setPreferredWidth(Math.round(Math.max(24, Math.min(max, w0 + ev.clientX - x0))));
+    let moved = false;
+    const move = (ev: MouseEvent) => {
+      if (Math.abs(ev.clientX - x0) < 3 && !moved) return;
+      moved = true;
+      setPreferredWidth(Math.round(Math.max(24, Math.min(max, w0 + ev.clientX - x0))));
+    };
     const up = (ev: MouseEvent) => {
       window.removeEventListener('mousemove', move);
       window.removeEventListener('mouseup', up);
+      if (!moved) return; // a click (or the first click of a double-click) doesn't fix the width
       const w = Math.round(Math.max(24, Math.min(max, w0 + ev.clientX - x0)));
       try {
         localStorage.setItem(GRAPH_WIDTH_KEY, String(w));
@@ -248,10 +272,12 @@ export function CommitList({ commits, graph, maxLanes, badges, head, selected, o
                 <button className="icon-button" disabled={geometry.offset === 0} onClick={() => setLaneOffset((o) => Math.max(0, o - geometry.visible))}>
                   <ChevronLeft size={11} />
                 </button>
-                <span>
-                  {geometry.offset + 1}–{geometry.offset + geometry.visible}
-                  <span className="muted">/{maxLanes > GRAPH_LAYOUT_LANES ? `${lanes}+` : lanes}</span>
-                </span>
+                {graphWidth >= 84 && (
+                  <span>
+                    {geometry.offset + 1}–{geometry.offset + geometry.visible}
+                    <span className="muted">/{maxLanes > GRAPH_LAYOUT_LANES ? `${lanes}+` : lanes}</span>
+                  </span>
+                )}
                 <button
                   className="icon-button"
                   disabled={geometry.offset + geometry.visible >= lanes}
@@ -360,7 +386,7 @@ const CommitRow = memo(function CommitRow({
           {graphCell}
           <span className="commit-lines">
             <span className="commit-line">
-              <RefBadges badges={badges} onContextMenu={onBadgeMenu} />
+              <RefBadges badges={badges} onContextMenu={onBadgeMenu} fit={geometry?.width ?? 0} />
               {subject}
             </span>
             <span className="commit-line commit-meta-line" title={`${c.email} · ${new Date(c.date * 1000).toLocaleString()}`}>
@@ -375,7 +401,7 @@ const CommitRow = memo(function CommitRow({
         <>
           <span className="col-subject">
             {graphCell}
-            <RefBadges badges={badges} onContextMenu={onBadgeMenu} />
+            <RefBadges badges={badges} onContextMenu={onBadgeMenu} fit={geometry?.width ?? 0} />
             {subject}
           </span>
           <span className="col-author" title={c.email}>

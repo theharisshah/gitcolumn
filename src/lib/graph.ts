@@ -78,7 +78,8 @@ export class GraphLayout {
       const before = this.lanes;
       const segments: number[] = [];
       const add = (x1: number, y1: number, x2: number, _y2: number, color: number) => {
-        if (x1 < cap || x2 < cap) segments.push(x1, x2, y1 === 0 ? 0 : 1, color % COLOR_RANGE);
+        // Lanes past int16 range can never be shown; clamp so packing can't wrap them around.
+        if (x1 < cap || x2 < cap) segments.push(Math.min(x1, 32767), Math.min(x2, 32767), y1 === 0 ? 0 : 1, color % COLOR_RANGE);
       };
 
       // Every lane heading for this commit converges into its node; the node sits in the first one.
