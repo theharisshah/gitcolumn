@@ -68,7 +68,7 @@ export function useActions() {
         const before = await api.snapshot(path);
         return run('Pulling…', () => api.pull(path, getSetting('pullRebase')), {
           success: `Pulled ${status.upstream}`,
-          undo: undoHeadMove('Pull', before),
+          undo: (r) => (r?.conflicts ? null : undoHeadMove('Pull', before)()),
         });
       },
 
@@ -264,6 +264,7 @@ export function useActions() {
         if (!v) return;
         const config = await api.branchConfig(path, ref.name).catch(() => [] as [string, string][]);
         let deleted = false;
+        let remoteError: string | null = null;
         await run(
           `Deleting ${ref.name}…`,
           async () => {
@@ -284,11 +285,17 @@ export function useActions() {
             deleted = true;
             if (v.remote && ref.upstream) {
               const [remote, ...rest] = ref.upstream.split('/');
-              await api.deleteRemoteBranch(path, remote, rest.join('/'));
+              // A failed remote delete must not lose the (undoable) local delete.
+              await api.deleteRemoteBranch(path, remote, rest.join('/')).catch((e) => {
+                remoteError = e instanceof Error ? e.message : String(e);
+              });
             }
           },
           {
-            success: () => (deleted ? `Deleted ${ref.name}` : undefined),
+            success: () => {
+              if (remoteError) ui.toast('error', `Couldn't delete ${ref.upstream} on the remote`, remoteError);
+              return deleted ? `Deleted ${ref.name}` : undefined;
+            },
             undo: () =>
               deleted
                 ? {
@@ -297,7 +304,7 @@ export function useActions() {
                       kind: 'refs',
                       updates: [{ ref: ref.ref, old: null, new: ref.hash }],
                       // The upstream is gone too when it was deleted on the remote.
-                      config: config.filter(([k]) => !(v.remote && /\.(remote|merge)$/.test(k))),
+                      config: config.filter(([k]) => !(v.remote && !remoteError && /\.(remote|merge)$/i.test(k))),
                     },
                   }
                 : null,
@@ -348,8 +355,20 @@ export function useActions() {
           confirmLabel: 'Save',
         });
         if (!v) return;
+        const previous = new Map((await api.branchConfig(path, ref.name)).map(([k, val]) => [k.toLowerCase(), val]));
+        const key = (k: string) => `branch.${ref.name}.${k}`;
         return run('Updating tracking…', () => api.setUpstream(path, ref.name, String(v.upstream) || null), {
-          undo: () => ({ label: 'Track Branch', spec: { kind: 'upstream', branch: ref.name, previous: ref.upstream ?? null } }),
+          undo: () => ({
+            label: 'Track Branch',
+            spec: {
+              kind: 'upstream',
+              branch: ref.name,
+              config: [
+                [key('remote'), previous.get(key('remote').toLowerCase()) ?? null],
+                [key('merge'), previous.get(key('merge').toLowerCase()) ?? null],
+              ],
+            },
+          }),
         });
       },
 
@@ -450,9 +469,14 @@ export function useActions() {
         const message = String(v.body).trim() ? `${String(v.subject).trim()}\n\n${String(v.body).trim()}` : String(v.subject).trim();
         if (c.hash === status?.head) {
           const before = await api.snapshot(path);
-          return run('Rewording…', () => api.commit(path, message, true), {
+          // --only: change just the message; staged changes stay staged and out of the commit.
+          return run('Rewording…', () => api.commit(path, message, true, { only: true }), {
             success: 'Commit message updated',
-            undo: undoHeadMove('Edit Message', before),
+            undo: async () => {
+              const after = await currentHead();
+              if (!before.head || !after || after === before.head) return null;
+              return { label: 'Edit Message', spec: { kind: 'head-reset', from: after, to: before.head, mode: 'soft', branch: before.branch } };
+            },
           });
         }
         if (!c.parents[0]) return ui.toast('warning', 'Editing the first commit isn’t supported');
@@ -524,11 +548,13 @@ export function useActions() {
           confirmLabel: 'Stash',
         });
         if (!v) return;
+        const previousTop = (await api.stashes(path))[0]?.hash;
         return run('Stashing…', () => api.stashSave(path, { message: String(v.message), includeUntracked: !!v.untracked, keepIndex: !!v.keepIndex }), {
           success: 'Changes stashed',
           undo: async () => {
+            // git exits successfully when there was nothing to stash; don't pick up an older stash then.
             const top = (await api.stashes(path))[0];
-            return top ? { label: 'Stash', spec: { kind: 'stash-save', hash: top.hash } } : null;
+            return top && top.hash !== previousTop ? { label: 'Stash', spec: { kind: 'stash-save', hash: top.hash } } : null;
           },
         });
       },
@@ -734,7 +760,6 @@ export function useActions() {
       },
 
       async removeRemote(name: string) {
-        const url = remotes.find((r) => r.name === name)?.fetchUrl;
         const ok = await ui.confirm({
           title: `Remove remote "${name}"?`,
           message: 'Its remote-tracking branches will be removed locally. Nothing is deleted on the server.',
@@ -742,9 +767,13 @@ export function useActions() {
           danger: true,
         });
         if (!ok) return;
+        const [config, trackingRefs] = await Promise.all([
+          api.remoteConfig(path, name).catch(() => [] as [string, string][]),
+          api.remoteTrackingRefs(path, name).catch(() => [] as [string, string][]),
+        ]);
         return run('Removing remote…', () => api.removeRemote(path, name), {
           success: `Removed remote ${name}`,
-          undo: () => (url ? { label: 'Remove Remote', spec: { kind: 'remote-remove', name, url } } : null),
+          undo: () => (config.length ? { label: 'Remove Remote', spec: { kind: 'remote-remove', name, config, refs: trackingRefs } } : null),
         });
       },
 

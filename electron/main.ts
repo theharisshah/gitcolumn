@@ -286,7 +286,19 @@ function buildMenu() {
 app.setName('GitColumn');
 nativeTheme.themeSource = 'system';
 
+// One process per profile: two backends would race on the same repositories' undo journals.
+// (Development builds skip it so they can run next to an installed copy.)
+const primaryInstance = !app.isPackaged || app.requestSingleInstanceLock();
+if (!primaryInstance) app.quit();
+app.on('second-instance', () => {
+  const win = BrowserWindow.getAllWindows()[0];
+  if (!win) return createWindow();
+  if (win.isMinimized()) win.restore();
+  win.focus();
+});
+
 app.whenReady().then(() => {
+  if (!primaryInstance) return;
   if (process.platform === 'darwin' && !app.isPackaged && existsSync(devIcon)) {
     app.dock?.setIcon(nativeImage.createFromPath(devIcon));
   }

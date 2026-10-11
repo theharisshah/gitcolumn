@@ -1,7 +1,8 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { Ref, Remote, RepoInfo, Stash, Status, Submodule, UndoSpec, UndoState } from '../../shared/types';
 import { api, type ConflictResult } from '../lib/api';
-import { draftFromMessage, saveDraft } from '../lib/draft';
+import { draftFromMessage, loadDraft, saveDraft } from '../lib/draft';
+import { modKey } from '../lib/format';
 import { getSetting, onSettingsChange } from '../lib/settings';
 import { useUI } from '../ui/UIProvider';
 import { navBack, navForward, navInit, navPush, navReplace, type NavState, type View } from './navigation';
@@ -56,7 +57,8 @@ export interface RepoCtx {
   /** Called on every background poll, even when nothing changed (for views showing file contents) */
   subscribeTick(cb: () => void): () => void;
   run<T>(label: string, fn: () => Promise<T>, opts?: RunOptions<T>): Promise<T | undefined>;
-  undo(): Promise<void>;
+  undo(expectedId?: string): Promise<void>;
+  clearUndo(): Promise<void>;
   canUndo: boolean;
   /** Label of the operation ⌘Z would undo */
   undoLabel: string | null;
@@ -182,9 +184,12 @@ export function RepoProvider({ repo, active = true, children }: { repo: RepoInfo
   }, [active, autoFetch, hasRemotes, repo.path, load]);
 
   const loadUndo = useCallback(() => api.undoState(repo.path).then(setUndoState, () => undefined), [repo.path]);
-  useEffect(() => void loadUndo(), [loadUndo]);
+  // Another tab or window may have changed the journal; refresh when this tab comes forward.
+  useEffect(() => {
+    if (active) void loadUndo();
+  }, [loadUndo, active]);
 
-  const undoRef = useRef<() => Promise<void>>(async () => undefined);
+  const undoRef = useRef<(id?: string) => Promise<void>>(async () => undefined);
 
   const run = useCallback(
     async <T,>(label: string, fn: () => Promise<T>, opts: RunOptions<T> = {}): Promise<T | undefined> => {
@@ -194,6 +199,7 @@ export function RepoProvider({ repo, active = true, children }: { repo: RepoInfo
         const result = await fn();
         const cr = result as unknown as ConflictResult | undefined;
         let entry: UndoEntry | null | undefined = null;
+        let undoId: string | undefined;
         if (opts.undo) {
           try {
             entry = await opts.undo(result);
@@ -202,9 +208,12 @@ export function RepoProvider({ repo, active = true, children }: { repo: RepoInfo
           }
           if (entry) {
             try {
-              setUndoState(await api.undoPush(repo.path, entry.label, entry.spec));
-            } catch {
+              const state = await api.undoPush(repo.path, entry.label, entry.spec);
+              setUndoState(state);
+              undoId = state.top?.id;
+            } catch (e) {
               entry = null;
+              ui.toast('warning', 'This action could not be made undoable', e instanceof Error ? e.message : String(e));
             }
           }
         }
@@ -213,7 +222,8 @@ export function RepoProvider({ repo, active = true, children }: { repo: RepoInfo
           setView({ kind: 'working' });
         } else if (opts.success) {
           const msg = typeof opts.success === 'function' ? opts.success(result) : opts.success;
-          if (msg) ui.toast('success', msg, undefined, entry ? { label: 'Undo', onClick: () => undoRef.current() } : undefined);
+          // The toast's Undo applies to this operation only, not to whatever is newest by then.
+          if (msg) ui.toast('success', msg, undefined, entry ? { label: 'Undo', onClick: () => undoRef.current(undoId) } : undefined);
         }
         return result;
       } catch (e) {
@@ -228,21 +238,68 @@ export function RepoProvider({ repo, active = true, children }: { repo: RepoInfo
     [load, ui, repo.path, setView],
   );
 
-  const undo = useCallback(async () => {
-    const state = await api.undoState(repo.path).catch(() => null);
-    if (state) setUndoState(state);
-    if (!state?.top) {
-      ui.toast('info', 'Nothing to undo');
-      return;
-    }
-    const result = await run(`Undoing ${state.top.label}…`, () => api.undoRun(repo.path), { success: (r) => `Undid ${r.label}` });
-    if (result?.restoreMessage) {
-      // Saved first so the composer picks it up even if it isn't mounted right now.
-      saveDraft(repo.path, draftFromMessage(result.restoreMessage));
-      window.dispatchEvent(new CustomEvent('gitcolumn:restore-message', { detail: { repo: repo.path, message: result.restoreMessage } }));
-    }
+  const restoreMessage = useCallback(
+    (message: string) => {
+      const apply = () => {
+        // Saved first so the composer picks it up even if it isn't mounted right now.
+        saveDraft(repo.path, draftFromMessage(message));
+        window.dispatchEvent(new CustomEvent('gitcolumn:restore-message', { detail: { repo: repo.path, message } }));
+      };
+      const draft = loadDraft(repo.path);
+      if (!draft.subject && !draft.body) apply();
+      else ui.toast('info', 'Your commit message draft was kept', undefined, { label: 'Use Undone Message', onClick: apply });
+    },
+    [repo.path, ui],
+  );
+
+  /** Undo the newest journal entry; with `expectedId`, only if that entry is still the newest. */
+  const undo = useCallback(
+    async (expectedId?: string) => {
+      const state = await api.undoState(repo.path).catch(() => null);
+      if (state) setUndoState(state);
+      const top = state?.top;
+      if (!top) {
+        ui.toast('info', 'Nothing to undo');
+        return;
+      }
+      if (busyRef.current) {
+        ui.toast('info', 'Wait for the current operation to finish, then undo.');
+        return;
+      }
+      if (expectedId && top.id !== expectedId) {
+        ui.toast('info', 'That action can no longer be undone from here', `${modKey}Z would undo “${top.label}” instead.`);
+        return;
+      }
+      busyRef.current = true;
+      setBusy(`Undoing ${top.label}…`);
+      try {
+        const result = await api.undoRun(repo.path, top.id);
+        setUndoState(result.state);
+        if (result.conflicts) ui.toast('warning', `Undid ${result.label} with conflicts`, 'Resolve the conflicted files in the Working Copy.');
+        else ui.toast('success', `Undid ${result.label}`, result.note);
+        if (result.restoreMessage) restoreMessage(result.restoreMessage);
+      } catch (e) {
+        const after = await api.undoState(repo.path).catch(() => null);
+        if (after) setUndoState(after);
+        const kept = after?.top?.id === top.id;
+        ui.toast(
+          'error',
+          `Couldn't undo ${top.label}`,
+          e instanceof Error ? e.message : String(e),
+          kept ? { label: 'Skip It', onClick: () => void api.undoDrop(repo.path, top.id).then(setUndoState, () => undefined) } : undefined,
+        );
+      } finally {
+        busyRef.current = false;
+        setBusy(null);
+        await load(true);
+      }
+    },
+    [ui, repo.path, load, restoreMessage],
+  );
+  const clearUndo = useCallback(async () => {
+    await api.undoClear(repo.path).catch(() => undefined);
     await loadUndo();
-  }, [run, ui, repo.path, loadUndo]);
+  }, [repo.path, loadUndo]);
   undoRef.current = undo;
 
   const currentBranch = useMemo(() => refs.find((r) => r.type === 'head' && r.current), [refs]);
@@ -274,6 +331,7 @@ export function RepoProvider({ repo, active = true, children }: { repo: RepoInfo
       subscribeTick,
       run,
       undo,
+      clearUndo,
       canUndo,
       undoLabel,
     }),
@@ -301,6 +359,7 @@ export function RepoProvider({ repo, active = true, children }: { repo: RepoInfo
       subscribeTick,
       run,
       undo,
+      clearUndo,
       canUndo,
       undoLabel,
     ],

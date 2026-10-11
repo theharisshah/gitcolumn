@@ -51,6 +51,24 @@ export function insideRepo(repo: string, rel: string): string {
   return abs;
 }
 
+/**
+ * A working tree path that is safe to write: inside the repository, not inside .git, and with no
+ * symbolic link anywhere below the repository root (a write would follow it to another place).
+ */
+export async function writablePath(repo: string, rel: string): Promise<string> {
+  const abs = insideRepo(repo, rel);
+  const segments = path.relative(repo, abs).split(path.sep).filter(Boolean);
+  if (segments.some((s) => s.toLowerCase() === '.git')) throw new Error(`Refusing to write inside .git: ${rel}`);
+  let current = repo;
+  for (const segment of segments) {
+    current = path.join(current, segment);
+    const st = await fs.lstat(current).catch(() => null);
+    if (!st) break; // the rest doesn't exist yet and will be created
+    if (st.isSymbolicLink()) throw new Error(`Refusing to write through a symbolic link: ${path.relative(repo, current)}`);
+  }
+  return abs;
+}
+
 export function expandHome(p: string): string {
   const trimmed = p.trim();
   if (trimmed === '~') return os.homedir();

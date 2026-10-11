@@ -119,3 +119,17 @@ function cleanError(text: string): string {
     .join('\n')
     .trim();
 }
+
+/**
+ * Blob ids of working tree files, hashed without filters (as stored by snapshots).
+ * Paths go as arguments: --stdin-paths would C-unquote a path that starts with a double quote.
+ */
+export async function hashFiles(cwd: string, paths: string[], write = false): Promise<string[]> {
+  const ids: string[] = [];
+  for (let i = 0; i < paths.length; i += 200) {
+    const chunk = paths.slice(i, i + 200);
+    const out = await git(cwd, ['hash-object', ...(write ? ['-w'] : []), '--no-filters', '--', ...chunk]);
+    ids.push(...out.trim().split('\n'));
+  }
+  return ids;
+}

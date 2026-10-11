@@ -121,7 +121,8 @@ export const api = {
   resolveConflict: (repo: string, path: string, side: 'ours' | 'theirs', conflictType?: string) =>
     call('conflict.resolve', { repo, path, side, conflictType }),
 
-  commit: (repo: string, message: string, amend?: boolean) => call('commit', { repo, message, amend }),
+  commit: (repo: string, message: string, amend?: boolean, opts: { signoff?: boolean; only?: boolean } = {}) =>
+    call('commit', { repo, message, amend, ...opts }),
   checkout: (repo: string, branch: string) => call('checkout', { repo, branch }),
   checkoutDetached: (repo: string, ref: string) => call('checkout.detached', { repo, ref }),
   checkoutRemote: (repo: string, remoteBranch: string, localName: string) =>
@@ -149,9 +150,12 @@ export const api = {
   stashStore: (repo: string, hash: string, message: string) => call('stash.store', { repo, hash, message }),
   undoPush: (repo: string, label: string, spec: UndoSpec) => call<UndoState>('undo.push', { repo, label, spec }),
   undoState: (repo: string) => call<UndoState>('undo.state', { repo }),
-  undoRun: (repo: string) => call<UndoResult & { state: UndoState }>('undo.run', { repo }),
+  undoRun: (repo: string, id?: string) => call<UndoResult & { state: UndoState }>('undo.run', { repo, id }),
+  undoDrop: (repo: string, id: string) => call<UndoState>('undo.drop', { repo, id }),
   undoClear: (repo: string) => call('undo.clear', { repo }),
   branchConfig: (repo: string, branch: string) => call<[string, string][]>('config.branchEntries', { repo, branch }),
+  remoteConfig: (repo: string, name: string) => call<[string, string][]>('config.remoteEntries', { repo, name }),
+  remoteTrackingRefs: (repo: string, name: string) => call<[string, string][]>('refs.remoteTracking', { repo, name }),
   submodules: (repo: string) => call<Submodule[]>('submodules', { repo }),
   updateSubmodule: (repo: string, path?: string) => call('submodule.update', { repo, path }),
   addSubmodule: (repo: string, url: string, path: string) => call('submodule.add', { repo, url, path }),

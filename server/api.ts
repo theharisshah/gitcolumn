@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { existsSync, promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -28,7 +29,7 @@ import type {
   Status,
   Submodule,
 } from '../shared/types.ts';
-import { git, GitError, gitRaw } from './git.ts';
+import { git, GitError, gitRaw, hashFiles } from './git.ts';
 import {
   FILE_LOG_FORMAT,
   FS,
@@ -64,6 +65,7 @@ import {
   mimeType,
   NETWORK_TIMEOUT,
   readText,
+  writablePath,
   run,
   shellQuote,
   stripComments,
@@ -139,7 +141,9 @@ export function createApi(host: Host): Record<string, Handler> {
   async function withConflicts(repo: string, run: () => Promise<unknown>): Promise<ConflictResult> {
     try {
       await run();
-      return { conflicts: false };
+      // Some commands succeed yet leave conflicts (e.g. pull --rebase re-applying an autostash).
+      const unmerged = await git(repo, ['diff', '--name-only', '--diff-filter=U']).catch(() => '');
+      return unmerged.trim() ? { conflicts: true } : { conflicts: false };
     } catch (e) {
       const status = await getStatus(repo).catch(() => null);
       if (status && status.files.some((f) => f.conflicted)) {
@@ -205,7 +209,8 @@ export function createApi(host: Host): Record<string, Handler> {
       const dir = expandHome(p);
       await fs.mkdir(dir, { recursive: true });
       await git(dir, ['init']);
-      return { path: dir, name: path.basename(dir) };
+      const real = await fs.realpath(dir);
+      return { path: real, name: path.basename(real) };
     },
 
     async 'repo.clone'({ url, path: p }: { url: string; path: string }): Promise<RepoInfo> {
@@ -213,7 +218,8 @@ export function createApi(host: Host): Record<string, Handler> {
       if (existsSync(dir) && (await fs.readdir(dir)).length > 0) throw new Error(`Destination is not empty: ${dir}`);
       await fs.mkdir(path.dirname(dir), { recursive: true });
       await git(path.dirname(dir), ['clone', '--', url, dir], { timeout: 60 * 60_000 });
-      return { path: dir, name: path.basename(dir) };
+      const real = await fs.realpath(dir);
+      return { path: real, name: path.basename(real) };
     },
 
     // ----------------------------------------------------------- read state
@@ -456,9 +462,12 @@ export function createApi(host: Host): Record<string, Handler> {
     },
 
     // ------------------------------------------------------------- commits
-    async commit({ repo, message, amend }: { repo: string; message: string; amend?: boolean }) {
+    async commit({ repo, message, amend, signoff, only }: { repo: string; message: string; amend?: boolean; signoff?: boolean; only?: boolean }) {
       const args = ['commit', '-F', '-'];
       if (amend) args.push('--amend');
+      // With --amend and no paths: change only the message, leaving staged changes alone.
+      if (amend && only) args.push('--only');
+      if (signoff) args.push('--signoff');
       await git(repo, args, { input: message });
     },
 
@@ -878,7 +887,8 @@ export function createApi(host: Host): Record<string, Handler> {
     async 'snapshot.capture'({ repo, paths }: { repo: string; paths?: string[] }): Promise<Snapshot> {
       const [head, branch, index] = await Promise.all([
         git(repo, ['rev-parse', '--verify', '-q', 'HEAD']).then((s) => s.trim() || null, () => null),
-        git(repo, ['symbolic-ref', '-q', '--short', 'HEAD']).then((s) => s.trim() || null, () => null),
+        // Not --short: that turns "main" into "heads/main" when a tag of the same name exists.
+        git(repo, ['symbolic-ref', '-q', 'HEAD']).then((s) => s.trim().replace(/^refs\/heads\//, '') || null, () => null),
         git(repo, ['write-tree']).then((s) => s.trim() || null, () => null),
       ]);
       const snapshot: Snapshot = { head, branch, index };
@@ -897,10 +907,7 @@ export function createApi(host: Host): Record<string, Handler> {
           // symlinks, directories and submodules are left out of the snapshot
         }
         if (existing.length) {
-          const out = await git(repo, ['hash-object', '-w', '--no-filters', '--stdin-paths'], {
-            input: existing.map((e) => e.path).join('\n') + '\n',
-          });
-          const hashes = out.trim().split('\n');
+          const hashes = await hashFiles(repo, existing.map((e) => e.path), true);
           existing.forEach((e, i) => files.push({ path: e.path, blob: hashes[i], mode: e.mode }));
         }
         snapshot.files = files;
@@ -909,14 +916,23 @@ export function createApi(host: Host): Record<string, Handler> {
     },
 
     async 'snapshot.restore'({ repo, snapshot, index = true }: { repo: string; snapshot: Snapshot; index?: boolean }) {
-      for (const f of snapshot.files ?? []) {
-        const abs = insideRepo(repo, f.path);
+      const targets = await Promise.all((snapshot.files ?? []).map((f) => writablePath(repo, f.path)));
+      for (const [i, f] of (snapshot.files ?? []).entries()) {
+        const abs = targets[i];
         if (f.blob) {
           assertHash(f.blob);
           const data = await gitRaw(repo, ['cat-file', 'blob', f.blob]);
           await fs.mkdir(path.dirname(abs), { recursive: true });
-          await fs.writeFile(abs, data);
-          if (f.mode) await fs.chmod(abs, f.mode);
+          // Write next to the file and rename into place, so a failed write (disk full…) never leaves it truncated.
+          const tmp = path.join(path.dirname(abs), `.${path.basename(abs)}.${randomUUID()}.gitcolumn-tmp`);
+          try {
+            await fs.writeFile(tmp, data, { mode: f.mode ?? 0o644 });
+            if (f.mode) await fs.chmod(tmp, f.mode);
+            await fs.rename(tmp, abs);
+          } catch (e) {
+            await fs.rm(tmp, { force: true });
+            throw e;
+          }
         } else {
           await fs.rm(abs, { force: true });
         }

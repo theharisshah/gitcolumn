@@ -342,12 +342,17 @@ export type UndoSpec =
   | { kind: 'refs'; updates: { ref: string; old: string | null; new: string | null }[]; config?: [string, string | null][] }
   | { kind: 'checkout'; from: HeadPos; to: HeadPos; deleteBranch?: { name: string; hash: string } }
   | { kind: 'branch-rename'; from: string; to: string; hash: string }
-  | { kind: 'upstream'; branch: string; previous: string | null }
+  /** Previous raw branch.<name>.remote / .merge values (null = unset) */
+  | { kind: 'upstream'; branch: string; config: [string, string | null][] }
   | { kind: 'stash-save'; hash: string }
   | { kind: 'stash-apply'; snapshot: Snapshot; restore?: { hash: string; message: string } }
   | { kind: 'stash-drop'; hash: string; message: string }
   | { kind: 'remote-add'; name: string }
-  | { kind: 'remote-remove'; name: string; url: string };
+  /**
+   * Every remote.<name>.* value plus the branch.*.remote/merge/pushRemote and remote.pushDefault values
+   * that pointed at it, and its remote-tracking refs (restored when their objects still exist).
+   */
+  | { kind: 'remote-remove'; name: string; config: [string, string][]; refs?: [string, string][] };
 
 export interface UndoState {
   count: number;
@@ -356,6 +361,10 @@ export interface UndoState {
 
 export interface UndoResult {
   label: string;
+  /** The undo ran but left conflicts to resolve (e.g. re-applying a stash) */
+  conflicts?: boolean;
+  /** Something the user should know, e.g. a part that was left as it is */
+  note?: string;
   /** For undone commits: the message to put back into the composer */
   restoreMessage?: string;
 }
