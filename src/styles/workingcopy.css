@@ -117,7 +117,7 @@
 .diff-summary {
   white-space: nowrap;
 }
-.diff-context {
+.diff-context-select {
   width: auto;
   height: 24px;
   padding: 0 6px;

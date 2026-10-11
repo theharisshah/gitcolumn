@@ -10,6 +10,7 @@ import { useRepo } from '../repo/RepoContext';
 import { useUI, type MenuItem } from '../ui/UIProvider';
 import { FileContent } from './FileContent';
 import { FileTree } from './FileTree';
+import { Highlighted } from './Highlighted';
 import { RevPicker } from './RevPicker';
 import { Splitter, usePersistentSize } from './Splitter';
 import { primaryStatus } from './StatusBadge';
@@ -155,15 +156,5 @@ export function FilesBrowser({ rev, initialPath, compact }: { rev: string | null
         )}
       </div>
     </div>
-  );
-}
-
-function Highlighted({ text, positions }: { text: string; positions: number[] }) {
-  if (!positions.length) return <>{text}</>;
-  const set = new Set(positions);
-  return (
-    <>
-      {[...text].map((ch, i) => (set.has(i) ? <mark key={i}>{ch}</mark> : ch))}
-    </>
   );
 }

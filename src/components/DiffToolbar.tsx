@@ -66,7 +66,7 @@ export function DiffToolbar({
       )}
       <span className="diff-summary muted">{diffSummary(diff)}</span>
       <span className="spacer" />
-      <select className="input diff-context" value={context} onChange={(e) => onContext(Number(e.target.value))} title="Lines of context around each change">
+      <select className="input diff-context-select" value={context} onChange={(e) => onContext(Number(e.target.value))} title="Lines of context around each change">
         {!known && <option value={context}>{plural(context, 'line')}</option>}
         {CONTEXT_OPTIONS.map((o) => (
           <option key={o.value} value={o.value}>

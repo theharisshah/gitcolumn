@@ -117,6 +117,7 @@ export function Toolbar({ onRepoMenu }: { onRepoMenu: (e: React.MouseEvent) => v
       </div>
 
       <div className="toolbar-spacer" />
+      <ToolbarSearch />
 
       {busy && (
         <div className="activity">
@@ -284,6 +285,30 @@ export function StateBanner() {
           {s.merging && !s.rebasing ? 'Commit Merge' : 'Continue'}
         </button>
       </div>
+    </div>
+  );
+}
+
+/** "Search for Message": opens History filtered by commit message. */
+function ToolbarSearch() {
+  const { setView } = useRepo();
+  const [value, setValue] = useState('');
+  return (
+    <div className="toolbar-search search-box" title="Search commit messages in History">
+      <Search size={13} />
+      <input
+        placeholder="Search for Message"
+        value={value}
+        spellCheck={false}
+        onChange={(e) => setValue(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' && value.trim()) setView({ kind: 'history', search: value.trim() });
+          else if (e.key === 'Escape') {
+            setValue('');
+            e.currentTarget.blur();
+          }
+        }}
+      />
     </div>
   );
 }
