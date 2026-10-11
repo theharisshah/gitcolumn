@@ -446,9 +446,14 @@ export interface GhRepo {
   mergeMethods: GhMergeMethod[];
   /** The signed-in account may merge pull requests there (write access) */
   canMerge: boolean;
-  /** The local remote that points at it */
+  /** The local remote of this clone's GitHub repository (for a fork, the fork) */
   remote: string;
+  /** The local remote that points at nameWithOwner (null for a fork with no remote for its parent) */
+  targetRemote: string | null;
 }
+
+/** What `gh pr merge` did: merged, added to a merge queue, or turned on auto-merge */
+export type GhMergeOutcome = 'merged' | 'queued' | 'auto' | 'unknown';
 
 export type GhStatus =
   | { state: 'ready'; host: string; repo: GhRepo; user: string | null }
@@ -520,4 +525,6 @@ export interface GhPullDetail extends GhPullSummary {
   checkRuns: GhCheck[];
   commits: { oid: string; headline: string; date: string; authors: string[] }[];
   files: { path: string; additions: number; deletions: number }[];
+  /** The local remote that has the head branch (null if none does) */
+  headRemote: string | null;
 }

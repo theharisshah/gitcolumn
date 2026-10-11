@@ -241,3 +241,8 @@
 .gh-gate-message {
   white-space: pre-wrap;
 }
+
+.pulls-more {
+  padding: 10px 12px;
+  text-align: center;
+}

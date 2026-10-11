@@ -822,3 +822,58 @@ describe('persistent undo', () => {
     await assert.rejects(undoAfterRestart(), /Nothing to undo/);
   });
 });
+
+describe('undo of a pull request checkout', () => {
+  test('switches back first, then moves the branch gh fast-forwarded back, with its settings', async () => {
+    const repo = makeRepo();
+    const call = session();
+    const sha = (r: string) => sh(repo, 'rev-parse', r);
+    sh(repo, 'branch', 'feature');
+    sh(repo, 'config', 'branch.feature.remote', 'origin');
+    const old = sha('feature');
+    // What gh did: switch to the existing feature branch and fast-forward it (and change its settings).
+    sh(repo, 'switch', '-q', 'feature');
+    writeFileSync(path.join(repo, 'b.txt'), 'b\n');
+    sh(repo, 'add', '-A');
+    sh(repo, 'commit', '-qm', 'From the PR');
+    sh(repo, 'config', 'branch.feature.remote', 'https://github.com/me/r.git');
+    const moved = sha('feature');
+    const spec: UndoSpec = {
+      kind: 'multi',
+      steps: [
+        { kind: 'checkout', from: { head: old, branch: 'main' }, to: { head: moved, branch: 'feature' } },
+        { kind: 'refs', updates: [{ ref: 'refs/heads/feature', old: moved, new: old }], config: [['branch.feature.remote', 'origin']] },
+      ],
+    };
+    await call('undo.push', { repo, label: 'Checkout', spec });
+    await session()('undo.run', { repo });
+    assert.equal(sh(repo, 'symbolic-ref', '--short', 'HEAD'), 'main');
+    assert.equal(sha('feature'), old);
+    assert.equal(sh(repo, 'config', 'branch.feature.remote'), 'origin');
+  });
+
+  test('a stale step is caught before anything changes', async () => {
+    const repo = makeRepo();
+    const call = session();
+    sh(repo, 'branch', 'feature');
+    const old = sh(repo, 'rev-parse', 'feature');
+    sh(repo, 'switch', '-q', 'feature');
+    writeFileSync(path.join(repo, 'b.txt'), 'b\n');
+    sh(repo, 'add', '-A');
+    sh(repo, 'commit', '-qm', 'From the PR');
+    const moved = sh(repo, 'rev-parse', 'feature');
+    await call('undo.push', {
+      repo,
+      label: 'Checkout',
+      spec: {
+        kind: 'multi',
+        steps: [
+          { kind: 'checkout', from: { head: old, branch: 'main' }, to: { head: moved, branch: 'feature' } },
+          { kind: 'refs', updates: [{ ref: 'refs/heads/feature', old: '1'.repeat(40), new: old }] },
+        ],
+      } satisfies UndoSpec,
+    });
+    await assert.rejects(session()('undo.run', { repo }));
+    assert.equal(sh(repo, 'symbolic-ref', '--short', 'HEAD'), 'feature', 'still where it was');
+  });
+});

@@ -14,11 +14,22 @@ import { Splitter, usePersistentSize } from './Splitter';
 type PrState = 'open' | 'closed' | 'merged';
 type Tab = 'conversation' | 'checks' | 'files' | 'commits';
 
-const avatarFor = (login: string) => (/^[\w-]+$/.test(login) ? `https://avatars.githubusercontent.com/${login}?s=64` : undefined);
+/**
+ * github.com avatars by login (an app such as "app/dependabot" is the "dependabot[bot]" account).
+ * Enterprise logins are other accounts, so they get initials.
+ */
+const avatarFor = (login: string, host: string | undefined) => {
+  if (host !== 'github.com') return undefined;
+  const app = /^app\/([\w-]+)$/.exec(login);
+  if (app) return `https://avatars.githubusercontent.com/${app[1]}%5Bbot%5D?s=64`;
+  return /^[\w-]+(\[bot\])?$/.test(login) ? `https://avatars.githubusercontent.com/${encodeURIComponent(login)}?s=64` : undefined;
+};
+/** gh's list sizes: the first page, then "Show more" up to the most gh pr list allows. */
+const LIMITS = [50, 100, 200];
 
 /** GitHub pull requests for this repository, through the user's gh login. */
 export function PullRequests({ state = 'open', number }: { state?: PrState; number?: number }) {
-  const { repo, setView, version } = useRepo();
+  const { repo, setView } = useRepo();
   const actions = useActions();
   const [status, setStatus] = useState<GhStatus | null>(null);
   const [list, setList] = useState<GhPullSummary[] | null>(null);
@@ -27,6 +38,22 @@ export function PullRequests({ state = 'open', number }: { state?: PrState; numb
   const [query, setQuery] = useState('');
   const [width, setWidth] = usePersistentSize('pulls.list', 420);
   const [reload, setReload] = useState(0);
+  const [limit, setLimit] = useState(LIMITS[0]);
+  /** The limit the list on screen was loaded with */
+  const [loaded, setLoaded] = useState(LIMITS[0]);
+  const ui = useUI();
+  // A pull request created elsewhere in the app (Create Pull Request…) shows up in the list.
+  useEffect(() => {
+    const onChanged = (e: Event) => (e as CustomEvent<{ repo: string }>).detail?.repo === repo.path && setReload((n) => n + 1);
+    window.addEventListener('gitcolumn:pulls-changed', onChanged);
+    return () => window.removeEventListener('gitcolumn:pulls-changed', onChanged);
+  }, [repo.path]);
+  useEffect(() => setLimit(LIMITS[0]), [state, query]);
+  // A new filter starts from an empty list; a reload keeps the current one on screen meanwhile.
+  useEffect(() => {
+    setList(null);
+    setError(null);
+  }, [state, query]);
 
   const loadStatus = useCallback(
     (refresh = false) => {
@@ -42,24 +69,38 @@ export function PullRequests({ state = 'open', number }: { state?: PrState; numb
     return () => clearTimeout(t);
   }, [search]);
 
+  // Pull requests are GitHub's data: re-listed on filter changes, Reload and pull request
+  // operations, not on every local change.
   useEffect(() => {
     if (status?.state !== 'ready') return;
     let cancelled = false;
-    setList(null);
-    api.prList(repo.path, state, query || undefined).then(
+    api.prList(repo.path, state, query || undefined, limit).then(
       (l) => {
         if (cancelled) return;
         setList(l);
+        setLoaded(limit);
         setError(null);
-        if (number === undefined && l[0]) setView({ kind: 'pulls', state, number: l[0].number }, { replace: true });
       },
-      (e) => !cancelled && setError(e instanceof Error ? e.message : String(e)),
+      (e) => {
+        if (cancelled) return;
+        const message = e instanceof Error ? e.message : String(e);
+        // A failed reload keeps the list that's already there.
+        setList((prev) => {
+          if (!prev) setError(message);
+          else ui.toast('error', 'Couldn’t load pull requests', message);
+          return prev;
+        });
+      },
     );
     return () => {
       cancelled = true;
     };
-    // Re-list when switching state or searching, and after operations (version).
-  }, [status, repo.path, state, query, version, reload]);
+  }, [status, repo.path, state, query, limit, reload]);
+  // With nothing selected (opening the view, switching filters), select the first one. This reads
+  // the current selection, so it never overrides one made meanwhile (say, by going Back).
+  useEffect(() => {
+    if (number === undefined && list?.[0]) setView({ kind: 'pulls', state, number: list[0].number }, { replace: true });
+  }, [list, number, state, setView]);
 
   const select = (n: number) => setView({ kind: 'pulls', state, number: n }, { replace: true });
   const ready = status?.state === 'ready' ? status : null;
@@ -107,9 +148,9 @@ export function PullRequests({ state = 'open', number }: { state?: PrState; numb
             ) : !list.length ? (
               <div className="empty-state muted">No {state} pull requests{query ? ' match' : ''}.</div>
             ) : (
-              list.map((pr) => (
+              [...list.map((pr) => (
                 <div key={pr.number} className={`pull-row ${pr.number === number ? 'selected' : ''}`} onMouseDown={() => select(pr.number)}>
-                  <Avatar name={pr.author.login} email="" src={avatarFor(pr.author.login)} size={22} />
+                  <Avatar name={pr.author.login} email="" src={avatarFor(pr.author.login, ready?.host)} size={22} />
                   <div className="pull-row-text">
                     <div className="pull-row-title">
                       <PrIcon pr={pr} />
@@ -122,7 +163,26 @@ export function PullRequests({ state = 'open', number }: { state?: PrState; numb
                   <ReviewBadge decision={pr.reviewDecision} />
                   <ChecksBadge checks={pr.checks} />
                 </div>
-              ))
+              )),
+              // gh lists at most `limit`; say so instead of looking complete.
+              list.length >= loaded && (
+                <div key="more" className="pulls-more muted small">
+                  Showing the first {list.length}.{' '}
+                  {loaded < LIMITS[LIMITS.length - 1] ? (
+                    <button
+                      className="link-button small"
+                      onClick={() => {
+                        setLimit(LIMITS[LIMITS.indexOf(loaded) + 1]);
+                        setReload((n) => n + 1);
+                      }}
+                    >
+                      Show more
+                    </button>
+                  ) : (
+                    'Search to find others.'
+                  )}
+                </div>
+              )]
             )}
           </div>
         </div>
@@ -134,7 +194,8 @@ export function PullRequests({ state = 'open', number }: { state?: PrState; numb
               number={number}
               mergeMethods={ready?.repo.mergeMethods ?? ['merge']}
               canMerge={!!ready?.repo.canMerge}
-              remote={ready?.repo.remote ?? 'origin'}
+              host={ready?.host}
+              reload={reload}
               onChanged={() => setReload((n) => n + 1)}
             />
           ) : (
@@ -150,16 +211,18 @@ function PullDetail({
   number,
   mergeMethods,
   canMerge,
-  remote,
+  host,
+  reload,
   onChanged,
 }: {
   number: number;
   mergeMethods: GhMergeMethod[];
   canMerge: boolean;
-  remote: string;
+  host: string | undefined;
+  reload: number;
   onChanged: () => void;
 }) {
-  const { repo, run, version } = useRepo();
+  const { repo, run } = useRepo();
   const actions = useActions();
   const ui = useUI();
   const [pr, setPr] = useState<GhPullDetail | null>(null);
@@ -172,24 +235,27 @@ function PullDetail({
     let cancelled = false;
     api.prView(repo.path, number).then(
       (p) => !cancelled && (setPr(p), setError(null)),
-      (e) => !cancelled && setError(e instanceof Error ? e.message : String(e)),
+      // A failed reload keeps what's on screen.
+      (e) => !cancelled && setPr((prev) => (prev ? prev : (setError(e instanceof Error ? e.message : String(e)), prev))),
     );
     return () => {
       cancelled = true;
     };
-  }, [repo.path, number, version]);
+  }, [repo.path, number, reload]);
 
+  const [diffAttempt, setDiffAttempt] = useState(0);
   useEffect(() => {
     if (tab !== 'files' || diffs) return;
     let cancelled = false;
+    setDiffError(null);
     api.prDiff(repo.path, number).then(
-      (d) => !cancelled && setDiffs(d),
+      (d) => !cancelled && (setDiffs(d), setDiffError(null)),
       (e) => !cancelled && setDiffError(e instanceof Error ? e.message : String(e)),
     );
     return () => {
       cancelled = true;
     };
-  }, [tab, diffs, repo.path, number]);
+  }, [tab, diffs, repo.path, number, diffAttempt]);
 
   const files: ChangedFile[] = useMemo(
     () => (pr?.files ?? []).map((f) => ({ path: f.path, status: 'M', additions: f.additions, deletions: f.deletions })),
@@ -220,17 +286,40 @@ function PullDetail({
             label: m === 'merge' ? 'Create a merge commit' : m === 'squash' ? 'Squash and merge' : 'Rebase and merge',
           })),
         },
-        ...(!pr.isCrossRepository ? [{ name: 'deleteBranch', type: 'checkbox' as const, label: `Delete ${remote}/${pr.headRefName} afterwards` }] : []),
+        // Only through a local remote that really has the head branch (not a fork's same-named one).
+        ...(pr.headRemote ? [{ name: 'deleteBranch', type: 'checkbox' as const, label: `Delete ${pr.headRemote}/${pr.headRefName} once merged` }] : []),
       ],
       confirmLabel: 'Merge',
     });
     if (!v) return;
-    const ok = await run(`Merging #${pr.number}…`, async () => {
-      await api.prMerge(repo.path, pr.number, v.method as 'merge' | 'squash' | 'rebase', pr.headRefOid);
-      if (v.deleteBranch) await api.deleteRemoteBranch(repo.path, remote, pr.headRefName).catch(() => undefined);
-      return true;
-    }, { success: `Merged #${pr.number}` });
-    if (ok) onChanged();
+    const headRemote = pr.headRemote;
+    const r = await run(
+      `Merging #${pr.number}…`,
+      async () => {
+        const { state } = await api.prMerge(repo.path, pr.number, v.method as 'merge' | 'squash' | 'rebase', pr.headRefOid);
+        let deleteError: string | null = null;
+        // A queued or auto-merge pull request is still open: deleting its branch would close it.
+        if (state === 'merged' && v.deleteBranch && headRemote) {
+          await api.deleteRemoteBranch(repo.path, headRemote, pr.headRefName).catch((e) => {
+            deleteError = e instanceof Error ? e.message : String(e);
+          });
+        }
+        return { state, deleteError };
+      },
+      {
+        success: ({ state }) =>
+          state === 'merged'
+            ? `Merged #${pr.number}`
+            : state === 'queued'
+              ? `Added #${pr.number} to the merge queue`
+              : state === 'auto'
+                ? `Auto-merge turned on for #${pr.number}: it merges once its checks pass`
+                : `Merge requested for #${pr.number}`,
+      },
+    );
+    if (!r) return;
+    if (r.deleteError) ui.toast('warning', `Couldn’t delete ${headRemote}/${pr.headRefName}`, r.deleteError);
+    onChanged();
   };
 
   const stateLabel = pr.state === 'merged' ? 'Merged' : pr.state === 'closed' ? 'Closed' : pr.isDraft ? 'Draft' : 'Open';
@@ -244,9 +333,9 @@ function PullDetail({
           <span className={`pull-state pull-state-${pr.state} ${pr.isDraft ? 'draft' : ''}`}>
             <PrIcon pr={pr} /> {stateLabel}
           </span>
-          <Avatar name={pr.author.login} email="" src={avatarFor(pr.author.login)} size={18} />
+          <Avatar name={pr.author.login} email="" src={avatarFor(pr.author.login, host)} size={18} />
           <span>
-            <b>{pr.author.login}</b> wants to merge {plural(pr.commits.length, 'commit')} into <span className="mono">{pr.baseRefName}</span> from{' '}
+            <b>{pr.author.login}</b> wants to merge {pr.commits.length >= 100 ? '100+ commits' : plural(pr.commits.length, 'commit')} into <span className="mono">{pr.baseRefName}</span> from{' '}
             <span className="mono">{pr.headRefName}</span>
           </span>
         </div>
@@ -284,7 +373,7 @@ function PullDetail({
           Files <span className="muted">{pr.changedFiles || ''}</span>
         </button>
         <button className={tab === 'commits' ? 'active' : ''} onClick={() => setTab('commits')}>
-          Commits <span className="muted">{pr.commits.length || ''}</span>
+          Commits <span className="muted">{pr.commits.length >= 100 ? '100+' : pr.commits.length || ''}</span>
         </button>
       </div>
       <div className="pull-body">
@@ -299,7 +388,7 @@ function PullDetail({
             {pr.conversation.map((c, i) => (
               <div key={i} className={`pull-comment ${c.kind}`}>
                 <div className="pull-comment-head">
-                  <Avatar name={c.author} email="" src={avatarFor(c.author)} size={16} />
+                  <Avatar name={c.author} email="" src={avatarFor(c.author, host)} size={16} />
                   <b>{c.author}</b>
                   {c.kind === 'review' && <span className={`review-state review-${(c.reviewState ?? '').toLowerCase()}`}>{REVIEW_LABEL[c.reviewState ?? ''] ?? 'reviewed'}</span>}
                   <span className="muted">{relativeTime(Date.parse(c.createdAt) / 1000)}</span>
@@ -329,9 +418,20 @@ function PullDetail({
         )}
         {tab === 'files' &&
           (diffError ? (
-            <div className="empty-state error-text">{diffError}</div>
+            <div className="empty-state">
+              <div className="error-text">{diffError}</div>
+              <button className="button button-small" onClick={() => setDiffAttempt((n) => n + 1)}>
+                Try Again
+              </button>
+            </div>
           ) : (
-            <ChangesetView files={files} diffs={diffs} idPrefix={`pr-${number}`} imagesFor={() => ({})} />
+            <ChangesetView
+              files={files}
+              diffs={diffs}
+              idPrefix={`pr-${number}`}
+              imagesFor={() => ({})}
+              totals={{ files: pr.changedFiles, additions: pr.additions, deletions: pr.deletions }}
+            />
           ))}
         {tab === 'commits' && (
           <div className="pull-commits">

@@ -1,5 +1,6 @@
 import type {
   GhMergeMethod,
+  GhMergeOutcome,
   GhPullDetail,
   GhPullSummary,
   GhStatus,
@@ -185,13 +186,13 @@ export const api = {
   logRange: (repo: string, from: string, to: string) => call<Commit[]>('log.range', { repo, from, to }),
   diffRange: (repo: string, from: string, to: string, paths?: string[]) => call<FileDiff[]>('diff.range', { repo, from, to, paths }),
   ghStatus: (repo: string, refresh = false) => call<GhStatus>('gh.status', { repo, refresh }),
-  prList: (repo: string, state: 'open' | 'closed' | 'merged', search?: string) => call<GhPullSummary[]>('gh.prList', { repo, state, search }),
+  prList: (repo: string, state: 'open' | 'closed' | 'merged', search?: string, limit?: number) => call<GhPullSummary[]>('gh.prList', { repo, state, search, limit }),
   prView: (repo: string, number: number) => call<GhPullDetail>('gh.prView', { repo, number }),
   prDiff: (repo: string, number: number) => call<FileDiff[]>('gh.prDiff', { repo, number }),
   prCheckout: (repo: string, number: number) => call('gh.prCheckout', { repo, number }),
   prCreate: (repo: string, opts: { title: string; body: string; base: string; head: string; draft?: boolean }) =>
     call<{ number: number | null; url: string }>('gh.prCreate', { repo, ...opts }),
-  prMerge: (repo: string, number: number, method: GhMergeMethod, headOid: string) => call('gh.prMerge', { repo, number, method, headOid }),
+  prMerge: (repo: string, number: number, method: GhMergeMethod, headOid: string) => call<{ state: GhMergeOutcome }>('gh.prMerge', { repo, number, method, headOid }),
   ghAvatars: (repo: string) => call<Record<string, string>>('gh.avatars', { repo }),
   ignoreInfo: (repo: string, path: string) =>
     call<{ isDir: boolean; tracked: boolean; suggestions: { pattern: string; label: string }[] }>('ignore.info', { repo, path }),

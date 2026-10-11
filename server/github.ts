@@ -5,16 +5,20 @@ import type {
   GhChecks,
   GhConversationItem,
   GhMergeMethod,
+  GhMergeOutcome,
   GhPullDetail,
   GhPullSummary,
   GhRepo,
   GhStatus,
   GhUser,
 } from '../shared/types.ts';
+import { promises as fs } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import type { HandlerModule } from './ctx.ts';
 import { git, gitEnv } from './git.ts';
 import { parseDiff } from './parse.ts';
-import { assertSafe, execCapture, NETWORK_TIMEOUT } from './util.ts';
+import { assertHash, assertSafe, execCapture, NETWORK_TIMEOUT } from './util.ts';
 
 export class GhError extends Error {
   constructor(
@@ -39,6 +43,35 @@ export function parseGitHubRemote(url: string): { host: string; owner: string; n
   if (parts.length !== 2 || !parts[0] || !parts[1]) return null;
   return { host: host.toLowerCase(), owner: parts[0], name: parts[1] };
 }
+
+/** Like gh's own normalization: ssh.github.com (SSH over 443), www.github.com… are github.com. */
+export function normalizeHost(host: string): string {
+  const h = host.toLowerCase().replace(/\.$/, '');
+  return h === 'github.com' || h.endsWith('.github.com') ? 'github.com' : h;
+}
+
+/** gh's config folder, where hosts.yml lists the hosts it has credentials for. */
+function ghConfigDir(): string {
+  if (process.env.GH_CONFIG_DIR) return process.env.GH_CONFIG_DIR;
+  if (process.env.XDG_CONFIG_HOME) return path.join(process.env.XDG_CONFIG_HOME, 'gh');
+  if (process.platform === 'win32' && process.env.AppData) return path.join(process.env.AppData, 'GitHub CLI');
+  return path.join(os.homedir(), '.config', 'gh');
+}
+
+/**
+ * Hosts it's safe to send gh requests to: github.com, GitHub Enterprise Cloud (*.ghe.com) and the
+ * hosts gh is signed in to. Any other host a remote names (GitLab, a company server…) is never
+ * contacted: gh would send it the enterprise token from the environment.
+ */
+export async function knownGitHubHosts(): Promise<Set<string>> {
+  const hosts = new Set(['github.com']);
+  const text = await fs.readFile(path.join(ghConfigDir(), 'hosts.yml'), 'utf8').catch(() => '');
+  for (const m of text.matchAll(/^["']?([^\s#:"'][^:"']*)["']?:\s*$/gm)) hosts.add(normalizeHost(m[1].trim()));
+  if (process.env.GH_HOST) hosts.add(normalizeHost(process.env.GH_HOST));
+  return hosts;
+}
+
+const isGitHubHost = (host: string, known: Set<string>) => known.has(host) || host.endsWith('.ghe.com');
 
 type RawCheck = {
   __typename?: string;
@@ -127,8 +160,10 @@ export const githubApi: HandlerModule = () => {
     return r.stdout;
   }
 
-  /** The GitHub repository behind this clone: origin, else the first remote that is on a GitHub host. */
-  async function remoteRepo(repo: string): Promise<{ remote: string; host: string; owner: string; name: string }> {
+  type GhRemote = { remote: string; host: string; owner: string; name: string };
+
+  /** Every remote whose URL names a repository on a GitHub host (aliases resolved), origin first. */
+  async function githubRemotes(repo: string): Promise<{ github: GhRemote[]; other: GhRemote[]; count: number }> {
     const out = await git(repo, ['remote', '-v']).catch(() => '');
     const remotes: { remote: string; url: string }[] = [];
     for (const line of out.split('\n')) {
@@ -136,11 +171,31 @@ export const githubApi: HandlerModule = () => {
       if (m) remotes.push({ remote: m[1], url: m[2] });
     }
     const ordered = [...remotes.filter((r) => r.remote === 'origin'), ...remotes.filter((r) => r.remote !== 'origin')];
+    const known = await knownGitHubHosts();
+    const github: GhRemote[] = [];
+    const other: GhRemote[] = [];
     for (const r of ordered) {
       const parsed = parseGitHubRemote(r.url);
-      if (parsed) return { remote: r.remote, ...parsed, host: await resolveSshHost(parsed.host, r.url) };
+      if (!parsed) continue;
+      const entry = { remote: r.remote, ...parsed, host: normalizeHost(await resolveSshHost(parsed.host, r.url)) };
+      (isGitHubHost(entry.host, known) ? github : other).push(entry);
     }
-    throw new GhError('not-github', remotes.length ? 'None of this repository’s remotes is on GitHub.' : 'This repository has no remotes.');
+    return { github, other, count: remotes.length };
+  }
+
+  const sameRepo = (r: GhRemote, host: string, nameWithOwner: string) => r.host === host && `${r.owner}/${r.name}`.toLowerCase() === nameWithOwner.toLowerCase();
+
+  /** The GitHub repository behind this clone: origin, else the first remote on a GitHub host. */
+  async function remoteRepo(repo: string): Promise<GhRemote> {
+    const { github, other, count } = await githubRemotes(repo);
+    if (github.length) return github[0];
+    if (other.length) {
+      throw new GhError(
+        'not-github',
+        `${other[0].host} isn’t a GitHub host gh is signed in to. If it’s GitHub Enterprise, sign in with “gh auth login --hostname ${other[0].host}”.`,
+      );
+    }
+    throw new GhError('not-github', count ? 'None of this repository’s remotes is on GitHub.' : 'This repository has no remotes.');
   }
 
   /** SSH remotes may use a host alias from ~/.ssh/config (e.g. "github-work" for a second account). */
@@ -193,6 +248,7 @@ export const githubApi: HandlerModule = () => {
       if (raw.mergeCommitAllowed) methods.push('merge');
       if (raw.squashMergeAllowed) methods.push('squash');
       if (raw.rebaseMergeAllowed) methods.push('rebase');
+      const { github } = await githubRemotes(repo);
       const repoInfo: GhRepo = {
         nameWithOwner: raw.nameWithOwner,
         url: raw.url,
@@ -202,6 +258,8 @@ export const githubApi: HandlerModule = () => {
         mergeMethods: methods.length ? methods : ['merge'],
         canMerge: ['ADMIN', 'MAINTAIN', 'WRITE'].includes(String(raw.viewerPermission ?? '').toUpperCase()),
         remote: where.remote,
+        // Without a fork, that's the clone's own remote (even if GitHub renamed the repository since).
+        targetRemote: parent ? (github.find((r) => sameRepo(r, where.host, raw.nameWithOwner))?.remote ?? null) : where.remote,
       };
       value = { state: 'ready', host: where.host, repo: repoInfo, user: userOut.trim() || null };
     } catch (e) {
@@ -225,6 +283,29 @@ export const githubApi: HandlerModule = () => {
     return { target: `${s.host}/${s.repo.nameWithOwner}`, status: s };
   }
 
+  /**
+   * What `gh pr create --head` needs for a local branch: the branch it was pushed to, prefixed with
+   * the owner when that's another repository (a fork, or a second remote such as "mine").
+   */
+  async function headFor(repo: string, branch: string, s: Extract<GhStatus, { state: 'ready' }>): Promise<string> {
+    const cfg = (key: string) => git(repo, ['config', '--get', key]).then((v) => v.trim() || null, () => null);
+    const [upRemote, upMerge, pushRemote, pushDefault] = await Promise.all([
+      cfg(`branch.${branch}.remote`),
+      cfg(`branch.${branch}.merge`),
+      cfg(`branch.${branch}.pushRemote`),
+      cfg('remote.pushDefault'),
+    ]);
+    const remoteName = pushRemote ?? pushDefault ?? upRemote;
+    // Pushing to the upstream's remote goes to the upstream branch; any other remote gets the same name.
+    const name = remoteName === upRemote && upMerge?.startsWith('refs/heads/') ? upMerge.slice('refs/heads/'.length) : branch;
+    const { github } = await githubRemotes(repo);
+    const pushed = github.find((r) => r.remote === remoteName);
+    if (pushed) return sameRepo(pushed, s.host, s.repo.nameWithOwner) ? name : `${pushed.owner}:${name}`;
+    // Not pushed through a GitHub remote we know: from a fork, the branch lives in the fork.
+    const where = await remoteRepo(repo);
+    return s.repo.isFork ? `${where.owner}:${name}` : name;
+  }
+
   const num = (n: unknown) => {
     const v = Number(n);
     if (!Number.isInteger(v) || v <= 0) throw new Error('Invalid pull request number');
@@ -245,7 +326,7 @@ export const githubApi: HandlerModule = () => {
     },
 
     async 'gh.prView'({ repo, number }: { repo: string; number: number }): Promise<GhPullDetail> {
-      const { target } = await ready(repo);
+      const { target, status: s } = await ready(repo);
       const raw = JSON.parse(
         await gh(repo, [
           'pr',
@@ -254,9 +335,17 @@ export const githubApi: HandlerModule = () => {
           '-R',
           target,
           '--json',
-          `${SUMMARY_FIELDS},body,headRefOid,baseRefOid,mergeable,mergeStateStatus,additions,deletions,changedFiles,mergedAt,closedAt,comments,reviews,commits,files`,
+          `${SUMMARY_FIELDS},body,headRefOid,baseRefOid,mergeable,mergeStateStatus,additions,deletions,changedFiles,mergedAt,closedAt,comments,reviews,commits,files,headRepository,headRepositoryOwner`,
         ]),
       );
+      // The local remote the head branch lives in (for deleting it after a merge), if there is one.
+      const headOwner = raw.headRepositoryOwner?.login;
+      const headName = raw.headRepository?.name;
+      const headRemote = !raw.isCrossRepository
+        ? s.repo.targetRemote
+        : headOwner && headName
+          ? ((await githubRemotes(repo)).github.find((r) => sameRepo(r, s.host, `${headOwner}/${headName}`))?.remote ?? null)
+          : null;
       const conversation: GhConversationItem[] = [
         ...(raw.comments ?? []).map((c: { author?: RawUser; body?: string; createdAt?: string }) => ({
           kind: 'comment' as const,
@@ -293,6 +382,7 @@ export const githubApi: HandlerModule = () => {
           authors: (c.authors ?? []).map((a) => a.login || a.name || ''),
         })),
         files: (raw.files ?? []).map((f: { path: string; additions?: number; deletions?: number }) => ({ path: f.path, additions: f.additions ?? 0, deletions: f.deletions ?? 0 })),
+        headRemote,
       };
     },
 
@@ -302,12 +392,22 @@ export const githubApi: HandlerModule = () => {
       try {
         return parseDiff(await gh(repo, ['pr', 'diff', num(number), '-R', target, '--color', 'never']));
       } catch (e) {
-        // GitHub refuses diffs that are too large; build it locally from refs/pull/N/head instead.
-        if (!(e instanceof GhError) || e.kind !== 'failed') throw e;
-        const view = JSON.parse(await gh(repo, ['pr', 'view', num(number), '-R', target, '--json', 'headRefOid,baseRefName']));
-        await git(repo, ['fetch', '--no-tags', s.repo.remote, `refs/pull/${num(number)}/head`], { timeout: NETWORK_TIMEOUT });
-        const base = (await git(repo, ['merge-base', 'FETCH_HEAD', `refs/remotes/${s.repo.remote}/${view.baseRefName}`])).trim();
-        return parseDiff(await git(repo, ['diff', '--no-color', '--no-ext-diff', '--src-prefix=a/', '--dst-prefix=b/', '-M', base, 'FETCH_HEAD'], { maxBytes: 30 * 1024 * 1024 }));
+        // GitHub refuses diffs that are too large; build it locally from refs/pull/N/head instead,
+        // fetched from the repository the pull request lives in (not a fork's copy of it).
+        if (!(e instanceof GhError) || e.kind !== 'failed' || !s.repo.targetRemote) throw e;
+        const remote = s.repo.targetRemote;
+        const view = JSON.parse(await gh(repo, ['pr', 'view', num(number), '-R', target, '--json', 'headRefOid,baseRefOid,baseRefName']));
+        assertHash(view.headRefOid);
+        assertHash(view.baseRefOid);
+        assertSafe(view.baseRefName);
+        await git(repo, ['fetch', '--no-tags', remote, `refs/pull/${num(number)}/head`, `refs/heads/${view.baseRefName}`], { timeout: NETWORK_TIMEOUT });
+        // The exact commits gh reported, not FETCH_HEAD, which another fetch may rewrite meanwhile.
+        const have = await git(repo, ['cat-file', '--batch-check'], { input: `${view.headRefOid}\n${view.baseRefOid}\n` });
+        if (/ missing$/m.test(have)) throw new Error('The pull request changed while loading its diff. Reload it.');
+        const base = (await git(repo, ['merge-base', view.headRefOid, view.baseRefOid])).trim();
+        return parseDiff(
+          await git(repo, ['diff', '--no-color', '--no-ext-diff', '--src-prefix=a/', '--dst-prefix=b/', '-M', base, view.headRefOid, '--'], { maxBytes: 30 * 1024 * 1024 }),
+        );
       }
     },
 
@@ -336,9 +436,7 @@ export const githubApi: HandlerModule = () => {
       if (!title?.trim()) throw new Error('A pull request needs a title.');
       assertSafe(base);
       assertSafe(head);
-      // From a fork, the head branch lives in the fork: owner:branch.
-      const where = await remoteRepo(repo);
-      const headArg = s.repo.isFork && !head.includes(':') ? `${where.owner}:${head}` : head;
+      const headArg = head.includes(':') ? head : await headFor(repo, head, s);
       const args = ['pr', 'create', '-R', target, '--title', title.trim(), '--body-file', '-', '--base', base, '--head', headArg];
       if (draft) args.push('--draft');
       const out = await gh(repo, args, { input: body ?? '' });
@@ -348,12 +446,22 @@ export const githubApi: HandlerModule = () => {
       return { number: m ? Number(m[1]) : null, url };
     },
 
-    /** Merge on GitHub, only if the head is still the commit the user saw. Never deletes local branches (-d). */
-    async 'gh.prMerge'({ repo, number, method, headOid }: { repo: string; number: number; method: GhMergeMethod; headOid: string }) {
+    /**
+     * Merge on GitHub, only if the head is still the commit the user saw. Never deletes branches (-d).
+     * With a merge queue or required checks, gh only queues it or turns on auto-merge (and still
+     * succeeds), so the pull request's state afterwards says what actually happened.
+     */
+    async 'gh.prMerge'({ repo, number, method, headOid }: { repo: string; number: number; method: GhMergeMethod; headOid: string }): Promise<{ state: GhMergeOutcome }> {
       const { target } = await ready(repo);
       if (!['merge', 'squash', 'rebase'].includes(method)) throw new Error('Invalid merge method');
       if (!/^[0-9a-f]{40,64}$/.test(headOid)) throw new Error('Invalid head commit');
       await gh(repo, ['pr', 'merge', num(number), '-R', target, `--${method}`, '--match-head-commit', headOid]);
+      const after = await gh(repo, ['pr', 'view', num(number), '-R', target, '--json', 'state,autoMergeRequest'])
+        .then((out) => JSON.parse(out) as { state?: string; autoMergeRequest?: unknown })
+        .catch(() => null);
+      if (!after) return { state: 'unknown' };
+      if (String(after.state).toUpperCase() === 'MERGED') return { state: 'merged' };
+      return { state: after.autoMergeRequest ? 'auto' : 'queued' };
     },
 
     /** Avatar URLs of recent authors (by email), from the default branch's history on GitHub. Cached for a day. */
@@ -367,14 +475,17 @@ export const githubApi: HandlerModule = () => {
         'query($owner:String!,$name:String!){repository(owner:$owner,name:$name){defaultBranchRef{target{... on Commit{history(first:100){nodes{author{email avatarUrl(size:64)}}}}}}}}';
       const value: Record<string, string> = {};
       try {
-        const out = JSON.parse(await gh(repo, ['api', 'graphql', '--hostname', s.host, '-f', `query=${query}`, '-F', `owner=${owner}`, '-F', `name=${name}`]));
+        // -f (raw strings): -F would turn a repository named "2048" into a number.
+        const out = JSON.parse(await gh(repo, ['api', 'graphql', '--hostname', s.host, '-f', `query=${query}`, '-f', `owner=${owner}`, '-f', `name=${name}`]));
         for (const n of out?.data?.repository?.defaultBranchRef?.target?.history?.nodes ?? []) {
           const email = n?.author?.email;
           const url = n?.author?.avatarUrl;
           if (email && typeof url === 'string' && url.startsWith('https://avatars.githubusercontent.com/')) value[String(email).toLowerCase()] = url;
         }
       } catch {
-        /* avatars are a nicety */
+        // Avatars are a nicety; try again in a few minutes (offline, rate limited…).
+        avatarCache.set(repo, { at: Date.now() - 24 * 3600_000 + 5 * 60_000, value });
+        return value;
       }
       avatarCache.set(repo, { at: Date.now(), value });
       return value;

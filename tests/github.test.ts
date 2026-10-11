@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { after, beforeEach, describe, test } from 'node:test';
 import { createApi, dispatch } from '../server/api.ts';
-import { normalizeChecks, normalizePull, parseGitHubRemote } from '../server/github.ts';
+import { knownGitHubHosts, normalizeChecks, normalizeHost, normalizePull, parseGitHubRemote } from '../server/github.ts';
 import type { GhPullDetail, GhPullSummary, GhStatus } from '../shared/types.ts';
 
 const FIXTURES = path.join(process.cwd(), 'tests', 'fixtures', 'gh');
@@ -34,6 +34,22 @@ describe('gh parsing', () => {
     assert.deepEqual(parseGitHubRemote('git@ghe.corp.example:team/app.git'), { host: 'ghe.corp.example', owner: 'team', name: 'app' });
     assert.equal(parseGitHubRemote('/srv/git/repo.git'), null);
     assert.equal(parseGitHubRemote('https://github.com/just-owner'), null);
+    assert.equal(normalizeHost(parseGitHubRemote('ssh://git@ssh.github.com:443/o/r.git')!.host), 'github.com');
+    assert.equal(normalizeHost('GHE.corp.example'), 'ghe.corp.example');
+  });
+
+  test('known hosts: github.com plus the ones gh is signed in to', async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'gitcolumn-ghcfg-'));
+    roots.push(dir);
+    writeFileSync(path.join(dir, 'hosts.yml'), 'github.com:\n    user: octo\nghe.corp.example:\n    users:\n        me:\n    git_protocol: ssh\n');
+    const prev = process.env.GH_CONFIG_DIR;
+    process.env.GH_CONFIG_DIR = dir;
+    try {
+      assert.deepEqual([...(await knownGitHubHosts())].sort(), ['ghe.corp.example', 'github.com']);
+    } finally {
+      if (prev === undefined) delete process.env.GH_CONFIG_DIR;
+      else process.env.GH_CONFIG_DIR = prev;
+    }
   });
 
   test('check runs and status contexts get one shape', () => {
@@ -78,14 +94,19 @@ if (args[0] === '--version') out('gh version 2.67.0 (2026-01-01)\\n');
 if (${JSON.stringify(mode)} === 'noauth') { process.stderr.write('To get started with GitHub CLI, please run:  gh auth login\\n'); process.exit(4); }
 if (args[0] === 'api' && args.includes('user')) out('octo\\n');
 if (args[0] === 'repo' && args[1] === 'view') out(JSON.stringify({ nameWithOwner: 'o/r', url: 'https://github.com/o/r', defaultBranchRef: { name: 'main' }, isFork: false, parent: null, mergeCommitAllowed: true, squashMergeAllowed: true, rebaseMergeAllowed: false, viewerPermission: 'WRITE' }));
+const state = (n) => { try { return fs.readFileSync(path.join(${JSON.stringify('DIR')}, n), 'utf8'); } catch { return null; } };
 if (args[0] === 'pr' && args[1] === 'list') out(fixture('pr-list.json'));
+if (args[0] === 'pr' && args[1] === 'view' && args.includes('state,autoMergeRequest')) out(state('merge-state.json') ?? '{"state":"MERGED","autoMergeRequest":null}');
+if (args[0] === 'pr' && args[1] === 'view' && args.includes('headRefOid,baseRefOid,baseRefName')) out(state('oids-' + args[2] + '.json'));
 if (args[0] === 'pr' && args[1] === 'view') out(fixture('pr-view.json'));
+if (args[0] === 'pr' && args[1] === 'diff' && state('diff-fails')) { process.stderr.write('HTTP 406: Sorry, the diff exceeded the maximum number of files'); process.exit(1); }
 if (args[0] === 'pr' && args[1] === 'create') out('Creating pull request for feature into main in o/r\\n\\nhttps://github.com/o/r/pull/42\\n');
 if (args[0] === 'pr' && args[1] === 'merge') out('');
 if (args[0] === 'pr' && args[1] === 'diff') out('diff --git a/x.txt b/x.txt\\n--- a/x.txt\\n+++ b/x.txt\\n@@ -1 +1 @@\\n-a\\n+b\\n');
 process.stderr.write('unexpected: ' + args.join(' ')); process.exit(1);
 `,
     );
+    writeFileSync(script, readFileSync(script, 'utf8').replace(JSON.stringify('DIR'), JSON.stringify(dir)));
     chmodSync(script, 0o755);
     process.env.GITCOLUMN_GH = script;
   }
@@ -110,6 +131,7 @@ process.stderr.write('unexpected: ' + args.join(' ')); process.exit(1);
     assert.deepEqual([s.host, s.user, s.repo.nameWithOwner, s.repo.defaultBranch, s.repo.remote], ['github.com', 'octo', 'o/r', 'main', 'origin']);
     assert.deepEqual(s.repo.mergeMethods, ['merge', 'squash']);
     assert.equal(s.repo.canMerge, true);
+    assert.equal(s.repo.targetRemote, 'origin');
     assert.ok(calls().every((c) => !c.args.includes('--force')));
   });
 
@@ -123,6 +145,19 @@ process.stderr.write('unexpected: ' + args.join(' ')); process.exit(1);
     assert.equal((await call<GhStatus>('gh.status', { refresh: true })).state, 'not-github');
   });
 
+  test('a remote on a host that isn’t GitHub is never contacted; a GitHub remote next to it is used', async () => {
+    fakeGh('ok');
+    execFileSync('git', ['-C', repo, 'remote', 'set-url', 'origin', 'https://gitlab.example.invalid/o/r.git']);
+    const s = await call<GhStatus>('gh.status', { refresh: true });
+    assert.equal(s.state, 'not-github');
+    assert.ok(!calls().some((c) => c.args.includes('--hostname')), 'no request to the other host');
+    execFileSync('git', ['-C', repo, 'remote', 'add', 'github', 'https://github.com/o/r.git']);
+    const s2 = await call<GhStatus>('gh.status', { refresh: true });
+    assert.equal(s2.state, 'ready');
+    if (s2.state === 'ready') assert.deepEqual([s2.host, s2.repo.remote], ['github.com', 'github']);
+    assert.ok(calls().every((c) => !c.args.includes('--hostname') || c.args[c.args.indexOf('--hostname') + 1] === 'github.com'));
+  });
+
   test('list and view use -R with the target repository', async () => {
     fakeGh('ok');
     const list = await call<GhPullSummary[]>('gh.prList', { state: 'open', search: 'search' });
@@ -134,6 +169,7 @@ process.stderr.write('unexpected: ' + args.join(' ')); process.exit(1);
     assert.deepEqual(pr.conversation.map((c) => [c.kind, c.author]), [['review', 'carol'], ['comment', 'bob']]);
     assert.equal(pr.checkRuns[0].state, 'success');
     assert.deepEqual(pr.files, [{ path: 'src/search.js', additions: 6, deletions: 1 }]);
+    assert.equal(pr.headRemote, 'origin');
     await assert.rejects(call('gh.prView', { number: '12; rm -rf /' }), /Invalid pull request number/);
   });
 
@@ -147,6 +183,30 @@ process.stderr.write('unexpected: ' + args.join(' ')); process.exit(1);
     await assert.rejects(call('gh.prCreate', { title: ' ', body: '', base: 'main', head: 'feature' }), /needs a title/);
   });
 
+  test('create names the head where the branch was pushed: another name, or another repository', async () => {
+    fakeGh('ok');
+    const headOf = async (branch: string) => {
+      await call('gh.prCreate', { title: 'T', body: '', base: 'main', head: branch });
+      const c = calls().filter((x) => x.args[1] === 'create').pop()!;
+      return c.args[c.args.indexOf('--head') + 1];
+    };
+    const config = (k: string, v: string) => execFileSync('git', ['-C', repo, 'config', k, v]);
+    // Tracks origin/haris/fix: the head is that branch.
+    config('branch.fix.remote', 'origin');
+    config('branch.fix.merge', 'refs/heads/haris/fix');
+    assert.equal(await headOf('fix'), 'haris/fix');
+    // Published to a second remote (the user's fork): owner:branch.
+    execFileSync('git', ['-C', repo, 'remote', 'add', 'mine', 'git@github.com:me/r.git']);
+    config('branch.feature.remote', 'mine');
+    config('branch.feature.merge', 'refs/heads/feature');
+    assert.equal(await headOf('feature'), 'me:feature');
+    // Pushes going elsewhere than the upstream (pushRemote) keep the local name.
+    config('branch.fix.pushRemote', 'mine');
+    assert.equal(await headOf('fix'), 'me:fix');
+    // Not pushed anywhere known: the local name.
+    assert.equal(await headOf('other'), 'other');
+  });
+
   test('merge pins the head commit and never deletes branches', async () => {
     fakeGh('ok');
     await call('gh.prMerge', { number: 12, method: 'squash', headOid: '1'.repeat(40) });
@@ -157,9 +217,58 @@ process.stderr.write('unexpected: ' + args.join(' ')); process.exit(1);
     await assert.rejects(call('gh.prMerge', { number: 12, method: 'force', headOid: '1'.repeat(40) }), /Invalid merge method/);
   });
 
+  test('merge reports a merge queue or auto-merge instead of "merged"', async () => {
+    fakeGh('ok');
+    const dir = path.dirname(repo);
+    assert.deepEqual(await call('gh.prMerge', { number: 12, method: 'squash', headOid: '1'.repeat(40) }), { state: 'merged' });
+    writeFileSync(path.join(dir, 'merge-state.json'), '{"state":"OPEN","autoMergeRequest":null}');
+    assert.deepEqual(await call('gh.prMerge', { number: 12, method: 'squash', headOid: '1'.repeat(40) }), { state: 'queued' });
+    writeFileSync(path.join(dir, 'merge-state.json'), '{"state":"OPEN","autoMergeRequest":{"enabledAt":"2026-10-11T00:00:00Z"}}');
+    assert.deepEqual(await call('gh.prMerge', { number: 12, method: 'squash', headOid: '1'.repeat(40) }), { state: 'auto' });
+  });
+
   test('diff comes back parsed', async () => {
     fakeGh('ok');
     const diffs = await call<{ newPath: string }[]>('gh.prDiff', { number: 12 });
     assert.deepEqual(diffs.map((d) => d.newPath), ['x.txt']);
+  });
+
+  test('a diff too large for GitHub is built locally from the exact commits, even with fetches running at once', async () => {
+    fakeGh('ok');
+    const dir = path.dirname(repo);
+    writeFileSync(path.join(dir, 'diff-fails'), '1');
+    // A local "GitHub": origin's SSH URL is served from dir/hub/o/r.git by a fake ssh.
+    const bare = path.join(dir, 'hub', 'o', 'r.git');
+    const work = path.join(dir, 'work');
+    const g = (cwd: string, ...a: string[]) => execFileSync('git', ['-C', cwd, ...a], { encoding: 'utf8' }).trim();
+    execFileSync('git', ['init', '-q', '--bare', bare]);
+    execFileSync('git', ['init', '-q', '-b', 'main', work]);
+    g(work, 'config', 'user.name', 'T');
+    g(work, 'config', 'user.email', 't@example.com');
+    writeFileSync(path.join(work, 'base.txt'), 'base\n');
+    g(work, 'add', '-A');
+    g(work, 'commit', '-qm', 'base');
+    const base = g(work, 'rev-parse', 'HEAD');
+    const pr = (n: number) => {
+      g(work, 'switch', '-q', '-c', `pr${n}`, base);
+      writeFileSync(path.join(work, `pr${n}.txt`), `${n}\n`);
+      g(work, 'add', '-A');
+      g(work, 'commit', '-qm', `pr ${n}`);
+      const head = g(work, 'rev-parse', 'HEAD');
+      g(work, 'push', '-q', bare, `HEAD:refs/pull/${n}/head`);
+      writeFileSync(path.join(dir, `oids-${n}.json`), JSON.stringify({ headRefOid: head, baseRefOid: base, baseRefName: 'main' }));
+    };
+    g(work, 'push', '-q', bare, 'main');
+    pr(1);
+    pr(2);
+    const ssh = path.join(dir, 'fake-ssh');
+    writeFileSync(ssh, `#!/bin/sh\nfor last; do :; done\ncd ${JSON.stringify(path.join(dir, 'hub'))} && sleep 0.2 && exec sh -c "$(printf '%s' "$last" | sed 's/^git-/git /')"\n`);
+    chmodSync(ssh, 0o755);
+    g(repo, 'config', 'core.sshCommand', ssh);
+    g(repo, 'config', 'ssh.variant', 'simple');
+    for (let i = 0; i < 3; i++) {
+      const [a, b] = await Promise.all([1, 2].map((n) => call<{ newPath: string }[]>('gh.prDiff', { number: n })));
+      assert.deepEqual([a.map((d) => d.newPath), b.map((d) => d.newPath)], [['pr1.txt'], ['pr2.txt']]);
+    }
   });
 });

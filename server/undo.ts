@@ -128,7 +128,7 @@ function validate(spec: UndoSpec) {
     if (!Array.isArray(spec.steps) || !spec.steps.length) throw new Error('Invalid undo spec');
     // Only steps that are safe to run one after another (and resume).
     for (const step of spec.steps) {
-      if (step.kind !== 'refs' && step.kind !== 'head-reset') throw new Error('Invalid undo spec');
+      if (step.kind !== 'refs' && step.kind !== 'head-reset' && step.kind !== 'checkout') throw new Error('Invalid undo spec');
       validate(step);
     }
   }
@@ -362,18 +362,23 @@ export const undoApi: HandlerModule = (ctx) => {
   }
 
   /** Would this step of a multi undo run? Throws the error its execution would, without changing anything. */
-  async function precheck(repo: string, step: UndoSpec) {
+  /** `released`: branches an earlier step of the same undo switches away from. */
+  async function precheck(repo: string, step: UndoSpec, released = new Set<string>()) {
     if (step.kind === 'refs') {
       const now = await Promise.all(step.updates.map((u) => git(repo, ['rev-parse', '--verify', '-q', u.ref]).then((s) => s.trim() || null, () => null)));
       if (step.updates.every((u, i) => now[i] === u.new)) return;
       if (step.updates.some((u, i) => now[i] !== u.old && now[i] !== u.new)) throw new StaleError();
       const inUse = await branchesInUse(repo);
-      const busy = step.updates.find((u, i) => u.old !== null && now[i] !== u.new && inUse.has(u.ref));
+      const busy = step.updates.find((u, i) => u.old !== null && now[i] !== u.new && inUse.has(u.ref) && !released.has(u.ref));
       if (busy) throw new BlockedError(`${busy.ref.replace(/^refs\/heads\//, '')} is checked out (or being rebased), so it can't be moved yet. Switch away from it, then undo.`);
     } else if (step.kind === 'head-reset') {
       const h = await head(repo);
       if (h !== step.from && h !== step.to) throw new StaleError();
       if ((await branch(repo)) !== step.branch) throw new StaleError();
+    } else if (step.kind === 'checkout') {
+      const [h, b] = [await head(repo), await branch(repo)];
+      const resumed = step.from.branch ? b === step.from.branch : !!step.from.head && h === step.from.head && !b;
+      if (!resumed && (h !== step.to.head || b !== step.to.branch)) throw new StaleError();
     }
   }
 
@@ -603,7 +608,11 @@ export const undoApi: HandlerModule = (ctx) => {
       }
       case 'multi': {
         // Check every step before changing anything, so a refusal never leaves the undo half done.
-        for (const step of spec.steps) await precheck(repo, step);
+        const released = new Set<string>();
+        for (const step of spec.steps) {
+          await precheck(repo, step, released);
+          if (step.kind === 'checkout' && step.to.branch && step.to.branch !== step.from.branch) released.add(`refs/heads/${step.to.branch}`);
+        }
         // In order; each step resumes (refs already in place, HEAD already reset) if an earlier try got halfway.
         for (const step of spec.steps) await execute(repo, step, undefined);
         return {};

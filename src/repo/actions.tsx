@@ -54,6 +54,17 @@ export function useActions() {
       return { label, spec: { kind: 'refs', updates: [{ ref, old: hash, new: null }], config } };
     };
 
+    /** A pull request template where GitHub looks for one (root, docs/, .github/; any case). */
+    const findPullRequestTemplate = async (rev: string): Promise<string> => {
+      for (const dir of ['.github', '', 'docs']) {
+        const entries = await api.treeList(path, rev, dir).catch(() => []);
+        const hit = entries.find((e) => e.type === 'blob' && /^pull_request_template\.md$/i.test(e.name));
+        const c = hit ? await api.fileContent(path, rev, hit.path).catch(() => null) : null;
+        if (c?.kind === 'text') return c.content;
+      }
+      return '';
+    };
+
     const actions = {
       undo: () => ctx.undo(),
 
@@ -1182,31 +1193,53 @@ export function useActions() {
           setView({ kind: 'pulls' });
           return ui.toast('info', 'GitHub isn’t set up for this repository yet', gh && gh.state !== 'not-installed' ? (gh as { message?: string }).message : undefined);
         }
-        let ref = refs.find((r) => r.type === 'head' && r.name === branch);
-        if (!ref?.upstream || ref.upstreamGone || (ref.ahead ?? 0) > 0) {
-          const publish = await ui.confirm({
-            title: ref?.upstream && !ref.upstreamGone ? `Push "${branch}" first?` : `Publish "${branch}" first?`,
-            message: ref?.upstream && !ref.upstreamGone ? `${plural(ref.ahead ?? 0, 'commit')} haven't been pushed yet.` : 'The branch has to be on GitHub before a pull request can be opened.',
-            confirmLabel: ref?.upstream && !ref.upstreamGone ? 'Push' : 'Publish',
+        const ref = refs.find((r) => r.type === 'head' && r.name === branch);
+        // The upstream counts only if it's a branch of the same name: pushing a branch that tracks
+        // origin/main would put its commits straight onto main.
+        const upRemote = ref?.upstream ? [...remotes].sort((a, b) => b.name.length - a.name.length).find((r) => ref.upstream!.startsWith(`${r.name}/`)) : undefined;
+        const tracked = !!upRemote && !ref?.upstreamGone && ref!.upstream!.slice(upRemote.name.length + 1) === branch;
+        if (tracked && (ref?.ahead ?? 0) > 0) {
+          const push = await ui.confirm({
+            title: `Push "${branch}" first?`,
+            message: `${plural(ref?.ahead ?? 0, 'commit')} haven't been pushed to ${ref?.upstream} yet.`,
+            confirmLabel: 'Push',
           });
-          if (!publish) return;
-          const pushed = await actions.push(branch);
+          if (!push || !(await actions.push(branch))) return;
+        } else if (!tracked) {
+          const v = await ui.form({
+            title: `Publish "${branch}" first?`,
+            message: ref?.upstream
+              ? `It tracks ${ref.upstream}. It's pushed as a branch of its own name, which it tracks from now on.`
+              : 'The branch has to be on GitHub before a pull request can be opened.',
+            fields: [
+              {
+                name: 'remote',
+                label: 'Remote',
+                type: 'select',
+                options: remotes.map((r) => ({ value: r.name, label: r.name })),
+                value: remotes.some((r) => r.name === gh.repo.remote) ? gh.repo.remote : remotes[0]?.name,
+              },
+            ],
+            confirmLabel: 'Publish',
+          });
+          if (!v) return;
+          const remote = String(v.remote);
+          const pushed = await run(`Publishing ${branch}…`, () => api.push(path, branch, { remote, remoteBranch: branch, setUpstream: true }), {
+            success: `Published ${branch} to ${remote}`,
+          });
           if (!pushed) return;
-          ref = (await api.refs(path)).find((r) => r.type === 'head' && r.name === branch);
         }
         const base = gh.repo.defaultBranch;
-        const commits = await api.logRange(path, `refs/remotes/${gh.repo.remote}/${base}`, branch).catch(() => []);
-        let template = '';
-        for (const p of ['.github/pull_request_template.md', '.github/PULL_REQUEST_TEMPLATE.md', 'docs/pull_request_template.md', 'pull_request_template.md']) {
-          const c = await api.fileContent(path, branch, p).catch(() => null);
-          if (c?.kind === 'text') {
-            template = c.content;
-            break;
-          }
-        }
+        // Commits and template come from the repository the pull request goes to (a fork's own
+        // default branch is often far behind).
+        const baseRemote = gh.repo.targetRemote ?? gh.repo.remote;
+        const baseRef = `refs/remotes/${baseRemote}/${base}`;
+        const haveBase = !!(await api.revParse(path, baseRef));
+        const commits = haveBase ? await api.logRange(path, baseRef, branch).catch(() => []) : [];
+        const template = await findPullRequestTemplate(haveBase ? baseRef : branch);
         const title = commits.length === 1 ? commits[0].subject : branch.replace(/^[\w-]+\//, '').replace(/[-_]+/g, ' ').replace(/^./, (ch) => ch.toUpperCase());
         const body = template || (commits.length > 1 ? commits.map((c) => `- ${c.subject}`).reverse().join('\n') : '');
-        const remoteBranches = refs.filter((r) => r.type === 'remote' && r.remote === gh.repo.remote).map((r) => r.name.slice(gh.repo.remote.length + 1));
+        const remoteBranches = refs.filter((r) => r.type === 'remote' && r.remote === baseRemote).map((r) => r.name.slice(baseRemote.length + 1));
         const v = await ui.form({
           title: 'Create Pull Request',
           message: (
@@ -1227,19 +1260,53 @@ export function useActions() {
           noRefresh: true,
         });
         if (!created) return;
+        window.dispatchEvent(new CustomEvent('gitcolumn:pulls-changed', { detail: { repo: path } }));
         if (created.number) setView({ kind: 'pulls', state: 'open', number: created.number });
         ui.toast('success', `Created pull request${created.number ? ` #${created.number}` : ''}`, created.url, { label: 'Open', onClick: () => window.open(created.url, '_blank') });
       },
 
-      /** gh pr checkout, undoable like any checkout (the branch it created is deleted again). */
+      /**
+       * gh pr checkout, undoable: back to the previous branch, a branch it created is deleted, and a
+       * branch it fast-forwarded (or whose settings it changed) is put back.
+       */
       async checkoutPullRequest(pr: { number: number; headRefName: string }) {
-        const existed = new Set(refs.filter((r) => r.type === 'head').map((r) => r.name));
+        const heads = new Map((await api.refs(path)).filter((r) => r.type === 'head').map((r) => [r.name, r.hash]));
+        // gh reuses a local branch named after the head (owner-prefixed for some forks).
+        const reused = [...heads.keys()].filter((n) => n === pr.headRefName || n.endsWith(`/${pr.headRefName}`));
+        const configs = new Map(await Promise.all(reused.map(async (n) => [n, await api.branchConfig(path, n).catch(() => [])] as const)));
         return run(`Checking out #${pr.number}…`, () => api.prCheckout(path, pr.number), {
           success: `Checked out #${pr.number}`,
           snapshot: true,
           undo: async (_r, before) => {
             const now = await currentPos();
-            return undoCheckout(before, now.branch && !existed.has(now.branch) ? now.branch : undefined)();
+            const after = new Map((await api.refs(path)).filter((r) => r.type === 'head').map((r) => [r.name, r.hash]));
+            const steps: UndoSpec[] = [];
+            const updates: { ref: string; old: string | null; new: string | null }[] = [];
+            const config: [string, string | null][] = [];
+            if (before.branch && before.branch === now.branch) {
+              // gh fast-forwarded the branch that was already checked out.
+              if (before.head && now.head && before.head !== now.head) {
+                steps.push({ kind: 'head-reset', from: now.head, to: before.head, mode: 'keep', branch: now.branch });
+              }
+            } else if (before.head !== now.head || before.branch !== now.branch) {
+              const created = now.branch && !heads.has(now.branch) ? now.branch : undefined;
+              const hash = created ? after.get(created) : undefined;
+              steps.push({ kind: 'checkout', from: { head: before.head, branch: before.branch }, to: now, deleteBranch: created && hash ? { name: created, hash } : undefined });
+            }
+            for (const [name, old] of heads) {
+              const moved = after.get(name);
+              if (moved && moved !== old && name !== (before.branch === now.branch ? now.branch : undefined)) {
+                updates.push({ ref: `refs/heads/${name}`, old: moved, new: old });
+              }
+            }
+            for (const [name, old] of configs) {
+              const cur = await api.branchConfig(path, name).catch(() => []);
+              if (JSON.stringify(cur) === JSON.stringify(old)) continue;
+              config.push(...old, ...cur.filter(([k]) => !old.some(([o]) => o === k)).map(([k]): [string, string | null] => [k, null]));
+            }
+            if (updates.length || config.length) steps.push({ kind: 'refs', updates, config });
+            if (!steps.length) return null;
+            return { label: 'Checkout', spec: steps.length === 1 ? steps[0] : { kind: 'multi', steps } };
           },
         });
       },

@@ -13,12 +13,15 @@ export function ChangesetView({
   idPrefix,
   imagesFor,
   fileMenu,
+  totals,
 }: {
   files: ChangedFile[];
   diffs: FileDiff[] | null;
   idPrefix: string;
   imagesFor: (d: FileDiff) => ImageSources;
   fileMenu?: (e: React.MouseEvent, path: string) => void;
+  /** Overall numbers when `files` is only part of the list (GitHub caps it at 100) */
+  totals?: { files: number; additions: number; deletions: number };
 }) {
   const [open, setOpen] = useState<Set<string>>(new Set());
 
@@ -29,8 +32,8 @@ export function ChangesetView({
     setOpen(total <= AUTO_EXPAND_LINES && diffs.length <= 40 ? new Set(diffs.map(pathOf)) : new Set());
   }, [diffs]);
 
-  const additions = useMemo(() => files.reduce((n, f) => n + (f.additions ?? 0), 0), [files]);
-  const deletions = useMemo(() => files.reduce((n, f) => n + (f.deletions ?? 0), 0), [files]);
+  const additions = useMemo(() => totals?.additions ?? files.reduce((n, f) => n + (f.additions ?? 0), 0), [files, totals]);
+  const deletions = useMemo(() => totals?.deletions ?? files.reduce((n, f) => n + (f.deletions ?? 0), 0), [files, totals]);
   const allOpen = !!diffs?.length && diffs.every((d) => open.has(pathOf(d)));
 
   return (
@@ -41,7 +44,7 @@ export function ChangesetView({
         </button>
         <span className="spacer" />
         <span className="muted small">
-          Showing {plural(files.length, 'changed file')} with {plural(additions, 'addition')} and {plural(deletions, 'deletion')}
+          Showing {plural(totals?.files ?? files.length, 'changed file')} with {plural(additions, 'addition')} and {plural(deletions, 'deletion')}
         </span>
       </div>
       {!diffs && <div className="diff-note muted">Loading changes…</div>}
