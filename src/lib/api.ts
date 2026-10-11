@@ -1,4 +1,6 @@
 import type {
+  BranchReviewRow,
+  Worktree,
   UndoResult,
   UndoSpec,
   UndoState,
@@ -137,7 +139,7 @@ export const api = {
   setUpstream: (repo: string, branch: string, upstream: string | null) => call('branch.setUpstream', { repo, branch, upstream }),
   merge: (repo: string, ref: string, opts: { noFF?: boolean; squash?: boolean } = {}) =>
     call<ConflictResult>('merge', { repo, ref, ...opts }),
-  rebase: (repo: string, onto: string) => call<ConflictResult>('rebase', { repo, onto }),
+  rebase: (repo: string, onto: string, upstream?: string) => call<ConflictResult>('rebase', { repo, onto, upstream }),
   cherryPick: (repo: string, hash: string) => call<ConflictResult>('cherryPick', { repo, hash }),
   revert: (repo: string, hash: string, parent?: number) => call<ConflictResult>('revert', { repo, hash, parent }),
   reset: (repo: string, hash: string, mode: 'soft' | 'mixed' | 'hard' | 'keep') => call('reset', { repo, hash, mode }),
@@ -158,6 +160,26 @@ export const api = {
   branchConfig: (repo: string, branch: string) => call<[string, string][]>('config.branchEntries', { repo, branch }),
   remoteConfig: (repo: string, name: string) => call<[string, string][]>('config.remoteEntries', { repo, name }),
   remoteTrackingRefs: (repo: string, name: string) => call<[string, string][]>('refs.remoteTracking', { repo, name }),
+  defaultBase: (repo: string) => call<string | null>('branches.defaultBase', { repo }),
+  branchesReview: (repo: string, base: string, includeRemote = false) => call<BranchReviewRow[]>('branches.review', { repo, base, includeRemote }),
+  deleteBranches: (repo: string, branches: { name: string; hash: string }[], base?: string) =>
+    call<{ deleted: { name: string; hash: string; config: [string, string][] }[] }>('branches.deleteMany', { repo, branches, base }),
+  setBranchFlag: (repo: string, branch: string, flag: 'pinned' | 'archived', value: boolean) => call('branch.setFlag', { repo, branch, flag, value }),
+  setBranchParent: (repo: string, branch: string, parent: string | null) => call('branch.setParent', { repo, branch, parent }),
+  createStackedBranch: (repo: string, name: string, parent: string, checkout = true) => call('branch.createStacked', { repo, name, parent, checkout }),
+  restack: (repo: string, branch: string, children = false) =>
+    call<{ moved: { name: string; old: string; new: string; oldBase: string | null }[]; conflicts: boolean; stoppedAt?: string; original: string | null }>(
+      'branch.restack',
+      { repo, branch, children },
+    ),
+  worktrees: (repo: string) => call<Worktree[]>('worktree.list', { repo }),
+  worktreeAdd: (repo: string, path: string, opts: { branch?: string; newBranch?: string; start?: string }) =>
+    call<{ path: string }>('worktree.add', { repo, path, ...opts }),
+  worktreeRemove: (repo: string, path: string, force = false) => call('worktree.remove', { repo, path, force }),
+  worktreePrune: (repo: string) => call('worktree.prune', { repo }),
+  mergeBase: (repo: string, a: string, b: string) => call<string | null>('merge.base', { repo, a, b }),
+  logRange: (repo: string, from: string, to: string) => call<Commit[]>('log.range', { repo, from, to }),
+  diffRange: (repo: string, from: string, to: string, paths?: string[]) => call<FileDiff[]>('diff.range', { repo, from, to, paths }),
   ignoreInfo: (repo: string, path: string) =>
     call<{ isDir: boolean; tracked: boolean; suggestions: { pattern: string; label: string }[] }>('ignore.info', { repo, path }),
   ignoreAdd: (repo: string, patterns: string[], target: 'gitignore' | 'exclude', untrack?: string[]) =>
@@ -179,7 +201,7 @@ export const api = {
 
   fetch: (repo: string, remote?: string, quiet?: boolean) => call('fetch', { repo, remote, quiet }),
   pull: (repo: string, rebase?: boolean) => call<ConflictResult>('pull', { repo, rebase }),
-  push: (repo: string, branch: string, opts: { remote?: string; force?: boolean; setUpstream?: boolean } = {}) =>
+  push: (repo: string, branch: string, opts: { remote?: string; force?: boolean; setUpstream?: boolean; remoteBranch?: string } = {}) =>
     call<{ remote: string }>('push', { repo, branch, ...opts }),
   addRemote: (repo: string, name: string, url: string) => call('remote.add', { repo, name, url }),
   removeRemote: (repo: string, name: string) => call('remote.remove', { repo, name }),

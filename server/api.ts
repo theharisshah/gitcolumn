@@ -54,6 +54,7 @@ import { filesApi } from './files.ts';
 import { reflogApi } from './reflog.ts';
 import { undoApi } from './undo.ts';
 import { ignoreApi } from './ignore.ts';
+import { annotateRefs, branchesApi } from './branches.ts';
 import type { ApiCtx, HandlerModule } from './ctx.ts';
 import {
   assertHash,
@@ -86,7 +87,7 @@ export interface Host {
 export type Handler = (args: any) => Promise<unknown>;
 
 /** Feature modules (files, reflog, undo, branches, rebase, github) contributing handlers. */
-const HANDLER_MODULES: HandlerModule[] = [filesApi, reflogApi, undoApi, ignoreApi];
+const HANDLER_MODULES: HandlerModule[] = [filesApi, reflogApi, undoApi, ignoreApi, branchesApi];
 
 export interface ConflictResult {
   conflicts: boolean;
@@ -256,9 +257,11 @@ export function createApi(host: Host): Record<string, Handler> {
       return getStatus(repo);
     },
 
-    async refs({ repo }: { repo: string }): Promise<Ref[]> {
+    async refs({ repo, plain }: { repo: string; plain?: boolean }): Promise<Ref[]> {
       const raw = await git(repo, ['for-each-ref', `--format=${REF_FORMAT}`, 'refs/heads', 'refs/remotes', 'refs/tags']);
-      return parseRefs(raw);
+      const refs = parseRefs(raw);
+      // Pinned/archived/parent flags and branches checked out in other worktrees.
+      return plain ? refs : annotateRefs(repo, refs);
     },
 
     async remotes({ repo }: { repo: string }): Promise<Remote[]> {
@@ -612,8 +615,13 @@ export function createApi(host: Host): Record<string, Handler> {
       return withConflicts(repo, () => git(repo, args));
     },
 
-    async rebase({ repo, onto }: { repo: string; onto: string }) {
+    /** Rebase the current branch onto `onto`; with `upstream`, only its commits after `upstream` (--onto). */
+    async rebase({ repo, onto, upstream }: { repo: string; onto: string; upstream?: string }) {
       assertSafe(onto);
+      if (upstream) {
+        assertSafe(upstream);
+        return withConflicts(repo, () => git(repo, ['rebase', '--onto', onto, upstream]));
+      }
       return withConflicts(repo, () => git(repo, ['rebase', onto]));
     },
 
@@ -681,12 +689,15 @@ export function createApi(host: Host): Record<string, Handler> {
       remote,
       force,
       setUpstream,
+      remoteBranch,
     }: {
       repo: string;
       branch: string;
       remote?: string;
       force?: boolean;
       setUpstream?: boolean;
+      /** Push to a branch of another name on the remote ("Push To…") */
+      remoteBranch?: string;
     }) {
       assertSafe(branch);
       const upstreamRemote = await configGet(repo, `branch.${branch}.remote`);
@@ -694,10 +705,15 @@ export function createApi(host: Host): Record<string, Handler> {
       const target = remote || upstreamRemote || (await firstRemote(repo));
       if (!target) throw new Error('This repository has no remotes. Add one first.');
       assertSafe(target);
-      const dest = target === upstreamRemote && upstreamMerge ? upstreamMerge : `refs/heads/${branch}`;
+      if (remoteBranch) assertSafe(remoteBranch);
+      const dest = remoteBranch
+        ? `refs/heads/${remoteBranch.replace(/^refs\/heads\//, '')}`
+        : target === upstreamRemote && upstreamMerge
+          ? upstreamMerge
+          : `refs/heads/${branch}`;
       const args = ['push'];
       if (force) args.push('--force-with-lease');
-      if (setUpstream || !upstreamRemote) args.push('--set-upstream');
+      if (setUpstream || (!upstreamRemote && !remoteBranch)) args.push('--set-upstream');
       args.push(target, `refs/heads/${branch}:${dest}`);
       await git(repo, args, { timeout: NETWORK_TIMEOUT });
       return { remote: target };

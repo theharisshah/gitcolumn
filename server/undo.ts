@@ -5,6 +5,7 @@ import path from 'node:path';
 import type { Snapshot, UndoResult, UndoSpec, UndoState } from '../shared/types.ts';
 import type { HandlerModule } from './ctx.ts';
 import { git, GitError, gitRaw, hashFiles, IndexLockedError, writeTree } from './git.ts';
+import { branchesInUse } from './branches.ts';
 import { ignoreFile } from './ignore.ts';
 import { assertHash, assertRef, assertSafe, insideRepo } from './util.ts';
 
@@ -52,7 +53,7 @@ class BlockedError extends Error {}
 
 const KINDS = new Set<UndoSpec['kind']>([
   'head-reset', 'commit', 'index', 'files', 'refs', 'checkout', 'branch-rename',
-  'upstream', 'stash-save', 'stash-apply', 'stash-drop', 'remote-add', 'remote-remove', 'ignore',
+  'upstream', 'stash-save', 'stash-apply', 'stash-drop', 'remote-add', 'remote-remove', 'ignore', 'multi',
 ]);
 
 // git prints config variable names in lower case, so compare case-insensitively.
@@ -99,6 +100,7 @@ function revivedObjects(spec: UndoSpec): string[] {
   else if (spec.kind === 'checkout') ids.push(spec.from.head);
   else if (spec.kind === 'head-reset') ids.push(spec.to);
   else if (spec.kind === 'commit') ids.push(spec.to);
+  else if (spec.kind === 'multi') ids.push(...spec.steps.flatMap(revivedObjects));
   return ids.filter((x): x is string => !!x);
 }
 
@@ -110,6 +112,7 @@ function objectsOf(spec: UndoSpec): string[] {
   else if (spec.kind === 'index') ids.push(spec.tree);
   else if (spec.kind === 'files' || spec.kind === 'stash-apply') ids.push(...snap(spec.snapshot));
   else if (spec.kind === 'ignore') ids.push(spec.index);
+  else if (spec.kind === 'multi') ids.push(...spec.steps.flatMap(objectsOf));
   return ids.filter((x): x is string => !!x);
 }
 
@@ -121,6 +124,14 @@ function validate(spec: UndoSpec) {
   if (spec.kind === 'refs' && !Array.isArray(spec.updates)) throw new Error('Invalid ref updates');
   if ((spec.kind === 'upstream' || spec.kind === 'remote-remove') && !Array.isArray(spec.config)) throw new Error('Invalid config');
   if (spec.kind === 'ignore' && (!['gitignore', 'exclude'].includes(spec.file) || typeof spec.after !== 'string')) throw new Error('Invalid ignore spec');
+  if (spec.kind === 'multi') {
+    if (!Array.isArray(spec.steps) || !spec.steps.length) throw new Error('Invalid undo spec');
+    // Only steps that are safe to run one after another (and resume).
+    for (const step of spec.steps) {
+      if (step.kind !== 'refs' && step.kind !== 'head-reset') throw new Error('Invalid undo spec');
+      validate(step);
+    }
+  }
 }
 
 function validEntry(e: unknown): e is Stored {
@@ -350,29 +361,6 @@ export const undoApi: HandlerModule = (ctx) => {
     }
   }
 
-  /** Branches git considers in use: checked out, or being rebased or bisected, in any worktree. */
-  async function branchesInUse(repo: string): Promise<Set<string>> {
-    const used = new Set<string>();
-    const current = await git(repo, ['symbolic-ref', '-q', 'HEAD']).then((s) => s.trim(), () => '');
-    if (current) used.add(current);
-    const list = await git(repo, ['worktree', 'list', '--porcelain']).catch(() => '');
-    for (const line of list.split('\n')) if (line.startsWith('branch ')) used.add(line.slice('branch '.length).trim());
-    const common = path.resolve(repo, (await git(repo, ['rev-parse', '--git-common-dir'])).trim());
-    const linked = await fs.readdir(path.join(common, 'worktrees')).catch(() => [] as string[]);
-    for (const dir of [common, ...linked.map((n) => path.join(common, 'worktrees', n))]) {
-      for (const f of ['rebase-merge/head-name', 'rebase-apply/head-name']) {
-        const name = (await fs.readFile(path.join(dir, f), 'utf8').catch(() => '')).trim();
-        if (name.startsWith('refs/heads/')) used.add(name);
-      }
-      // Branches a `rebase --update-refs` will move when it finishes.
-      const updateRefs = await fs.readFile(path.join(dir, 'rebase-merge', 'update-refs'), 'utf8').catch(() => '');
-      for (const line of updateRefs.split('\n')) if (line.startsWith('refs/heads/')) used.add(line.trim());
-      const bisect = (await fs.readFile(path.join(dir, 'BISECT_START'), 'utf8').catch(() => '')).trim();
-      if (bisect && !/^[0-9a-f]{40,64}$/.test(bisect)) used.add(`refs/heads/${bisect}`);
-    }
-    return used;
-  }
-
   /** Returns 'already' when every ref was already at its target (a resumed undo, or the user did it). */
   async function refTransaction(repo: string, updates: { ref: string; old: string | null; new: string | null }[]): Promise<'already' | void> {
     if (!updates.length) return;
@@ -592,6 +580,11 @@ export const undoApi: HandlerModule = (ctx) => {
           if (to.startsWith(prefix) && !to.includes('..')) await git(repo, ['symbolic-ref', ref, to]).catch(() => undefined);
         }
         return skipped.length ? { note: `Not restored (not allowed): ${skipped.join(', ')}` } : {};
+      }
+      case 'multi': {
+        // In order; each step resumes (refs already in place, HEAD already reset) if an earlier try got halfway.
+        for (const step of spec.steps) await execute(repo, step, undefined);
+        return {};
       }
       case 'ignore': {
         await expect(repo, { head: spec.head });

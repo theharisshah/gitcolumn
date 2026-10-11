@@ -1,8 +1,8 @@
 import { useMemo } from 'react';
-import type { Commit, FileDiff, FileStatus, HeadPos, LineSelection, PatchAction, RebaseStep, Ref, Snapshot, Stash } from '../../shared/types';
+import type { Commit, FileDiff, FileStatus, HeadPos, LineSelection, PatchAction, RebaseStep, Ref, Snapshot, Stash, UndoSpec, Worktree } from '../../shared/types';
 import { RebaseDialog } from '../components/RebaseDialog';
 import { api } from '../lib/api';
-import { plural, shortHash } from '../lib/format';
+import { modKey, plural, shortHash } from '../lib/format';
 import { getSetting } from '../lib/settings';
 import { useUI } from '../ui/UIProvider';
 import { useRepo, type UndoEntry } from './RepoContext';
@@ -879,6 +879,288 @@ export function useActions() {
               : null,
         });
       },
+
+      // ------------------------------------------------- branch organisation
+      setFlag: (ref: Ref, flag: 'pinned' | 'archived', value: boolean) =>
+        run(value ? (flag === 'pinned' ? 'Pinning…' : 'Archiving…') : flag === 'pinned' ? 'Unpinning…' : 'Unarchiving…', () =>
+          api.setBranchFlag(path, ref.name, flag, value),
+        ),
+
+      /** Delete several local branches at once (only if each is still where it was shown); undoable. */
+      async deleteBranches(branches: { name: string; hash: string }[], base?: string) {
+        if (!branches.length) return;
+        const ok = await ui.confirm({
+          title: `Delete ${plural(branches.length, 'branch', 'branches')}?`,
+          message: (
+            <>
+              {branches.slice(0, 8).map((b) => (
+                <div key={b.name} className="mono small">
+                  {b.name}
+                </div>
+              ))}
+              {branches.length > 8 && <div className="muted small">…and {branches.length - 8} more</div>}
+              <div className="muted small" style={{ marginTop: 8 }}>
+                Only local branches are deleted. You can undo this with {modKey}Z.
+              </div>
+            </>
+          ),
+          confirmLabel: 'Delete',
+          danger: true,
+        });
+        if (!ok) return;
+        return run('Deleting branches…', () => api.deleteBranches(path, branches, base), {
+          success: (r) => `Deleted ${plural(r.deleted.length, 'branch', 'branches')}`,
+          undo: (r) =>
+            r.deleted.length
+              ? {
+                  label: 'Delete Branches',
+                  spec: {
+                    kind: 'refs',
+                    updates: r.deleted.map((d) => ({ ref: `refs/heads/${d.name}`, old: null, new: d.hash })),
+                    config: r.deleted.flatMap((d) => d.config),
+                  },
+                }
+              : null,
+        });
+      },
+
+      /** Create a branch on top of another and remember it as its parent (a stack). */
+      async createStackedBranch(parent: string) {
+        const v = await ui.form({
+          title: 'Create Stacked Branch',
+          message: (
+            <>
+              On top of <b>{parent}</b>. Restack it later to move it onto the parent's newest commit.
+            </>
+          ),
+          fields: [
+            { name: 'name', label: 'Branch name', placeholder: `${parent}-part-2`, required: true, mono: true },
+            { name: 'checkout', label: 'Check out new branch', type: 'checkbox', value: true },
+          ],
+          validate: (v) => validateRefName(String(v.name)) ?? (localExists(String(v.name).trim()) ? 'A branch with this name already exists' : null),
+          confirmLabel: 'Create Branch',
+        });
+        if (!v) return;
+        const name = String(v.name).trim();
+        return run('Creating branch…', () => api.createStackedBranch(path, name, parent, !!v.checkout), {
+          success: `Created ${name} on ${parent}`,
+          snapshot: true,
+          undo: async (_r, before) => {
+            const entry = v.checkout ? await undoCheckout(before, name)() : await undoCreateRef('Create Branch', `refs/heads/${name}`)();
+            return entry && { ...entry, label: 'Create Branch' };
+          },
+        });
+      },
+
+      async trackParent(ref: Ref) {
+        const options = refs.filter((r) => r.type === 'head' && r.name !== ref.name);
+        if (!options.length) return ui.toast('info', 'There are no other local branches');
+        const v = await ui.form({
+          title: `Parent branch of "${ref.name}"`,
+          message: 'Stacked branches can be restacked onto their parent after it changes.',
+          fields: [
+            {
+              name: 'parent',
+              label: 'Parent',
+              type: 'select',
+              value: ref.parent ?? '',
+              options: [{ value: '', label: '(none)' }, ...options.map((r) => ({ value: r.name, label: r.name }))],
+            },
+          ],
+          confirmLabel: 'Save',
+        });
+        if (!v) return;
+        const previous = new Map((await api.branchConfig(path, ref.name)).map(([k, val]) => [k.toLowerCase(), val]));
+        const key = (k: string) => `branch.${ref.name}.${k}`;
+        return run('Saving parent…', () => api.setBranchParent(path, ref.name, String(v.parent) || null), {
+          undo: () => ({
+            label: 'Track Parent',
+            spec: {
+              kind: 'refs',
+              updates: [],
+              config: [
+                [key('gitcolumn-parent'), previous.get(key('gitcolumn-parent').toLowerCase()) ?? null],
+                [key('gitcolumn-parent-base'), previous.get(key('gitcolumn-parent-base').toLowerCase()) ?? null],
+              ],
+            },
+          }),
+        });
+      },
+
+      /** Move a stacked branch (and optionally its children) onto its parent's newest commit. */
+      async restack(ref: Ref, children = false) {
+        const label = children ? `Restacking ${ref.name} and its children…` : `Restacking ${ref.name}…`;
+        return run(label, () => api.restack(path, ref.name, children), {
+          success: (r) =>
+            r.conflicts
+              ? undefined
+              : r.moved.length
+                ? `Restacked ${r.moved.map((m) => m.name).join(', ')}`
+                : `${ref.name} is already on top of ${ref.parent}`,
+          undo: (r) => {
+            if (r.conflicts || !r.moved.length) return null;
+            const steps: UndoSpec[] = [];
+            const others = r.moved.filter((m) => m.name !== r.original);
+            steps.push({
+              kind: 'refs',
+              updates: others.map((m) => ({ ref: `refs/heads/${m.name}`, old: m.new, new: m.old })),
+              config: r.moved.map((m): [string, string | null] => [`branch.${m.name}.gitcolumn-parent-base`, m.oldBase]),
+            });
+            const self = r.moved.find((m) => m.name === r.original);
+            if (self) steps.push({ kind: 'head-reset', from: self.new, to: self.old, mode: 'keep', branch: r.original });
+            return { label: 'Restack', spec: { kind: 'multi', steps } };
+          },
+        });
+      },
+
+      /** Pull, then push the current branch. */
+      async sync() {
+        if (!status?.branch || !status.upstream) return ui.toast('warning', 'Sync needs a checked-out branch with an upstream');
+        const pulled = await actions.pull();
+        if (pulled && !pulled.conflicts) await actions.push();
+      },
+
+      /** Push a branch under another name, or to another remote, without changing its upstream. */
+      async pushTo(ref: Ref) {
+        const v = await ui.form({
+          title: `Push "${ref.name}" To…`,
+          fields: [
+            {
+              name: 'remote',
+              label: 'Remote',
+              type: 'select',
+              value: ref.upstream?.split('/')[0] ?? remotes[0]?.name,
+              options: remotes.map((r) => ({ value: r.name, label: r.name })),
+            },
+            {
+              name: 'branch',
+              label: 'Remote branch',
+              value: ref.name,
+              mono: true,
+              required: true,
+              suggestions: refs.filter((r) => r.type === 'remote').map((r) => r.name.slice((r.remote?.length ?? 0) + 1)),
+            },
+            { name: 'force', type: 'checkbox', label: 'Force push (with lease)' },
+          ],
+          validate: (v) => validateRefName(String(v.branch)),
+          confirmLabel: 'Push',
+        });
+        if (!v) return;
+        const remoteBranch = String(v.branch).trim();
+        return run(`Pushing ${ref.name}…`, () => api.push(path, ref.name, { remote: String(v.remote), remoteBranch, force: !!v.force }), {
+          success: (r) => `Pushed ${ref.name} to ${r.remote}/${remoteBranch}`,
+        });
+      },
+
+      /** A text field for any revision, with branch and tag names suggested, checked with rev-parse. */
+      async askRevision(title: string, confirmLabel: string, message?: React.ReactNode): Promise<string | null> {
+        const v = await ui.form({
+          title,
+          message,
+          fields: [
+            {
+              name: 'rev',
+              label: 'Revision',
+              placeholder: 'branch, tag or commit',
+              mono: true,
+              required: true,
+              suggestions: refs.map((r) => r.name),
+            },
+          ],
+          confirmLabel,
+        });
+        if (!v) return null;
+        const rev = String(v.rev).trim();
+        if (!(await api.revParse(path, rev))) {
+          ui.toast('error', `“${rev}” is not a revision in this repository`);
+          return null;
+        }
+        return rev;
+      },
+
+      async mergeRevision() {
+        const rev = await actions.askRevision('Merge With Revision', 'Continue');
+        if (rev) return actions.merge(rev);
+      },
+
+      async rebaseOnRevision() {
+        const rev = await actions.askRevision('Rebase On Revision', 'Continue');
+        if (rev) return actions.rebase(rev);
+      },
+
+      /** `git rebase --onto <new base> <old base>`: move only the branch's own commits. */
+      async rebaseOntoRevision() {
+        if (!status?.branch) return ui.toast('warning', 'Check out a branch first');
+        const branch = status.branch;
+        const v = await ui.form({
+          title: `Rebase "${branch}" Onto…`,
+          message: `Replays the commits of ${branch} after the old base onto the new base.`,
+          fields: [
+            { name: 'onto', label: 'New base', mono: true, required: true, suggestions: refs.map((r) => r.name) },
+            {
+              name: 'upstream',
+              label: 'Old base (commits after it are moved)',
+              mono: true,
+              required: true,
+              value: status.upstream ?? '',
+              suggestions: refs.map((r) => r.name),
+            },
+          ],
+          confirmLabel: 'Rebase',
+        });
+        if (!v) return;
+        const onto = String(v.onto).trim();
+        const upstream = String(v.upstream).trim();
+        for (const rev of [onto, upstream]) {
+          if (!(await api.revParse(path, rev))) return ui.toast('error', `“${rev}” is not a revision in this repository`);
+        }
+        return run(`Rebasing ${branch} onto ${onto}…`, () => api.rebase(path, onto, upstream), {
+          success: `Rebased ${branch} onto ${onto}`,
+          snapshot: true,
+          undo: (r, before) => (r?.conflicts ? null : undoHeadMove('Rebase', before)()),
+        });
+      },
+
+      compare: (base: string, head: string) => setView({ kind: 'compare', base, head }),
+
+      /** Check a branch out in a new worktree (a separate folder) and open it in a tab. */
+      async checkoutInWorktree(ref: Ref, openRepo: (path: string) => void) {
+        const parent = repo.path.slice(0, repo.path.lastIndexOf('/'));
+        const name = ref.type === 'remote' ? ref.name.slice((ref.remote?.length ?? 0) + 1) : ref.name;
+        const v = await ui.form({
+          title: `Check Out "${ref.name}" in a New Worktree`,
+          message: 'A worktree is another folder with its own checked-out branch, sharing this repository.',
+          fields: [
+            { name: 'path', label: 'Folder', value: `${parent}/${repo.name}-${name.replace(/[^\w.-]+/g, '-')}`, mono: true, required: true },
+            ...(ref.type === 'remote' && !localExists(name)
+              ? [{ name: 'newBranch', label: 'New local branch', value: name, mono: true, required: true }]
+              : []),
+          ],
+          confirmLabel: 'Create Worktree',
+        });
+        if (!v) return;
+        const opts = v.newBranch ? { newBranch: String(v.newBranch).trim(), start: ref.name } : { branch: ref.type === 'remote' ? name : ref.name };
+        const res = await run('Creating worktree…', () => api.worktreeAdd(path, String(v.path).trim(), opts), { success: 'Worktree created' });
+        if (res) openRepo(res.path);
+      },
+
+      async removeWorktree(wt: Worktree) {
+        const v = await ui.form({
+          title: 'Remove worktree?',
+          message: (
+            <>
+              <span className="mono">{wt.path}</span> will be deleted from disk. Its branch{wt.branch ? ` (${wt.branch})` : ''} is kept.
+            </>
+          ),
+          fields: [{ name: 'force', type: 'checkbox', label: 'Even if it has uncommitted changes (they are lost)' }],
+          confirmLabel: 'Remove',
+          danger: true,
+        });
+        if (!v) return;
+        return run('Removing worktree…', () => api.worktreeRemove(path, wt.path, !!v.force), { success: 'Worktree removed' });
+      },
+
+      pruneWorktrees: () => run('Pruning worktrees…', () => api.worktreePrune(path), { success: 'Pruned missing worktrees' }),
 
       showFileHistory: (filePath: string, rev?: string | null) => setView({ kind: 'file', path: filePath, mode: 'history', rev }),
 

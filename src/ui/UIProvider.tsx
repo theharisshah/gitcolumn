@@ -29,6 +29,8 @@ export interface Field {
   required?: boolean;
   mono?: boolean;
   hint?: string;
+  /** Text fields: values offered while typing (e.g. branch names for a revision) */
+  suggestions?: string[];
   /** Rendered next to a text field (e.g. "Browse…") */
   action?: { label: string; run: (values: FormValues) => Promise<Partial<FormValues> | void> };
 }
@@ -330,9 +332,17 @@ function FieldInput({
             placeholder={f.placeholder}
             spellCheck={false}
             autoComplete="off"
+            list={f.suggestions?.length ? `field-${f.name}-suggestions` : undefined}
             onChange={(e) => onChange(f.name, e.target.value)}
           />
         )}
+        {f.suggestions?.length ? (
+          <datalist id={`field-${f.name}-suggestions`}>
+            {f.suggestions.slice(0, 500).map((s) => (
+              <option key={s} value={s} />
+            ))}
+          </datalist>
+        ) : null}
         {f.action && (
           <button
             type="button"

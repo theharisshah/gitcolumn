@@ -58,6 +58,46 @@ export interface Ref {
   current?: boolean;
   date: number;
   subject: string;
+  /** Local branches: GitColumn flags kept in branch.<name>.gitcolumn-* config (they follow renames) */
+  pinned?: boolean;
+  archived?: boolean;
+  /** Stacked branches: the branch this one is based on */
+  parent?: string;
+  /** Path of another worktree where this branch is checked out */
+  worktree?: string;
+}
+
+export interface Worktree {
+  path: string;
+  head: string | null;
+  branch: string | null;
+  bare: boolean;
+  detached: boolean;
+  locked?: string;
+  prunable?: string;
+  /** The worktree this repository tab is showing */
+  current: boolean;
+}
+
+export interface BranchReviewRow {
+  name: string;
+  ref: string;
+  type: 'head' | 'remote';
+  hash: string;
+  /** Commits on the branch that the base doesn't have, and the other way round */
+  ahead: number;
+  behind: number;
+  merged: boolean;
+  date: number;
+  author: string;
+  subject: string;
+  upstream?: string;
+  gone?: boolean;
+  current?: boolean;
+  worktree?: string;
+  pinned?: boolean;
+  archived?: boolean;
+  parent?: string;
 }
 
 export interface Remote {
@@ -350,6 +390,8 @@ export type UndoSpec =
   | { kind: 'stash-apply'; snapshot: Snapshot; restore?: { hash: string; message: string } }
   | { kind: 'stash-drop'; hash: string; message: string }
   | { kind: 'remote-add'; name: string }
+  /** Several steps undone in order (e.g. a restack: other branches' refs, then the checked-out one) */
+  | { kind: 'multi'; steps: UndoSpec[] }
   /** Patterns added to .gitignore or .git/info/exclude (content before/after), optionally untracking files (old index tree) */
   | { kind: 'ignore'; file: 'gitignore' | 'exclude'; before: string | null; after: string; index?: string | null; head: string | null }
   /**

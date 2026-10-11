@@ -5,6 +5,7 @@ import { api, type SearchMode } from '../lib/api';
 import { copyText, shortHash } from '../lib/format';
 import { GRAPH_LAYOUT_LANES, GraphLayout, type GraphRow } from '../lib/graph';
 import { useActions } from '../repo/actions';
+import { useRefMenu } from '../repo/refMenu';
 import { useRepo } from '../repo/RepoContext';
 import { useUI, type MenuItem } from '../ui/UIProvider';
 import { CommitDetails } from './CommitDetails';
@@ -148,18 +149,10 @@ export function History({
     ui.menu(e, items);
   };
 
+  const refMenu = useRefMenu();
   const badgeMenu = (e: React.MouseEvent, b: BadgeRef) => {
     e.stopPropagation();
-    if (!b.ref) return;
-    const r = b.ref;
-    const items: MenuItem[] = [];
-    if (r.type !== 'tag' && !r.current) items.push({ label: `Check Out "${r.name}"`, onClick: () => actions.checkout(r) });
-    if (status?.branch && !r.current) {
-      items.push({ label: `Merge "${r.name}" into "${status.branch}"…`, onClick: () => actions.merge(r.name) });
-      items.push({ label: `Rebase "${status.branch}" onto "${r.name}"…`, onClick: () => actions.rebase(r.name) });
-    }
-    items.push('separator', { label: 'Copy Name', onClick: () => copyText(r.name) });
-    ui.menu(e, items);
+    if (b.ref) refMenu(e, b.ref);
   };
 
   // Stable handlers so memoized rows don't re-render on every keystroke or status poll.

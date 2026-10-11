@@ -1,12 +1,13 @@
-import { Archive, ChevronDown, ChevronRight, Cloud, Folder, FolderTree, GitBranch, GitPullRequest, History, Inbox, ListChecks, Package, Plus, RotateCcw, Search, Server, Settings, Tag, X } from 'lucide-react';
+import { Archive, ChevronDown, ChevronRight, Cloud, Folder, FolderGit2, FolderTree, GitBranch, GitPullRequest, History, Inbox, Layers, ListChecks, Package, Pin, Plus, RotateCcw, Search, Server, Settings, Tag, X } from 'lucide-react';
 import { useApp } from '../AppContext';
 import { api } from '../lib/api';
-import { useMemo, useState, type ReactNode } from 'react';
-import type { Ref } from '../../shared/types';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import type { Ref, Worktree } from '../../shared/types';
 import { copyText } from '../lib/format';
 import { useActions } from '../repo/actions';
+import { useRefMenu } from '../repo/refMenu';
 import { useRepo, type View } from '../repo/RepoContext';
-import { useUI, type MenuItem } from '../ui/UIProvider';
+import { useUI } from '../ui/UIProvider';
 
 interface TreeNode {
   name: string;
@@ -58,18 +59,41 @@ function useCollapsed() {
 }
 
 export function Sidebar() {
-  const { repo, status, refs, remotes, stashes, submodules, view, setView } = useRepo();
+  const { repo, status, refs, remotes, stashes, submodules, view, setView, version } = useRepo();
   const app = useApp();
   const actions = useActions();
   const ui = useUI();
   const { collapsed, toggle } = useCollapsed();
   const [filter, setFilter] = useState('');
 
+  const refMenu = useRefMenu();
+  const [worktrees, setWorktrees] = useState<Worktree[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    api.worktrees(repo.path).then((w) => !cancelled && setWorktrees(w), () => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [repo.path, version]);
+
   const f = filter.trim().toLowerCase();
   const match = (r: Ref) => !f || r.name.toLowerCase().includes(f);
-  const heads = useMemo(() => refs.filter((r) => r.type === 'head'), [refs]);
+  const allHeads = useMemo(() => refs.filter((r) => r.type === 'head'), [refs]);
+  const localNames = useMemo(() => new Set(allHeads.filter((r) => !r.archived).map((r) => r.name)), [allHeads]);
+  // Stacked branches are listed under their parent; pinned ones on top; archived ones separately.
+  const stackChildren = useMemo(() => {
+    const m = new Map<string, Ref[]>();
+    for (const r of allHeads) if (r.parent && !r.archived && localNames.has(r.parent) && r.parent !== r.name) m.set(r.parent, [...(m.get(r.parent) ?? []), r]);
+    for (const list of m.values()) list.sort((a, b) => a.name.localeCompare(b.name));
+    return m;
+  }, [allHeads, localNames]);
+  const isStacked = (r: Ref) => !!r.parent && localNames.has(r.parent) && r.parent !== r.name;
+  const pinned = useMemo(() => allHeads.filter((r) => r.pinned && !r.archived).sort((a, b) => a.name.localeCompare(b.name)), [allHeads]);
+  const archived = useMemo(() => allHeads.filter((r) => r.archived), [allHeads]);
+  const heads = useMemo(() => allHeads.filter((r) => !r.archived && !r.pinned && (f ? true : !isStacked(r))), [allHeads, f, localNames]);
   const tags = useMemo(() => refs.filter((r) => r.type === 'tag').sort((a, b) => b.date - a.date), [refs]);
   const headTree = useMemo(() => buildTree(heads.filter(match), (r) => r.name), [heads, f]);
+  const archivedTree = useMemo(() => buildTree(archived.filter(match), (r) => r.name), [archived, f]);
   const tagTree = useMemo(() => buildTree(tags.filter(match), (r) => r.name), [tags, f]);
   const remoteTrees = useMemo(
     () =>
@@ -91,44 +115,6 @@ export function Sidebar() {
     return true;
   };
 
-  const refMenu = (e: React.MouseEvent, r: Ref) => {
-    const branch = status?.branch;
-    const items: MenuItem[] = [];
-    if (r.type === 'head') {
-      if (!r.current) items.push({ label: `Check Out "${r.name}"`, onClick: () => actions.checkout(r) });
-      if (branch && !r.current) {
-        items.push({ label: `Merge "${r.name}" into "${branch}"…`, onClick: () => actions.merge(r.name) });
-        items.push({ label: `Rebase "${branch}" onto "${r.name}"…`, onClick: () => actions.rebase(r.name) });
-      }
-      items.push('separator');
-      items.push({ label: `Push "${r.name}"…`, onClick: () => actions.push(r.name) });
-      if (r.upstream) items.push({ label: `Force Push "${r.name}"…`, onClick: () => actions.push(r.name, { force: true }) });
-      items.push({ label: 'Track Remote Branch…', onClick: () => actions.setUpstream(r) });
-      items.push('separator');
-      items.push({ label: `New Branch from "${r.name}"…`, onClick: () => actions.createBranch(r.name) });
-      items.push({ label: `New Tag on "${r.name}"…`, onClick: () => actions.createTag(r.name, r.name) });
-      items.push({ label: 'Rename…', onClick: () => actions.renameBranch(r) });
-      items.push({ label: `Delete "${r.name}"…`, danger: true, disabled: r.current, onClick: () => actions.deleteBranch(r) });
-    } else if (r.type === 'remote') {
-      items.push({ label: `Check Out "${r.name}"`, onClick: () => actions.checkout(r) });
-      if (branch) {
-        items.push({ label: `Merge "${r.name}" into "${branch}"…`, onClick: () => actions.merge(r.name) });
-        items.push({ label: `Rebase "${branch}" onto "${r.name}"…`, onClick: () => actions.rebase(r.name) });
-      }
-      items.push('separator');
-      items.push({ label: `New Branch from "${r.name}"…`, onClick: () => actions.createBranch(r.name) });
-      items.push({ label: `Delete "${r.name}" on Remote…`, danger: true, onClick: () => actions.deleteRemoteBranch(r) });
-    } else {
-      items.push({ label: `Check Out "${r.name}"…`, onClick: () => actions.checkout(r) });
-      items.push({ label: `New Branch from "${r.name}"…`, onClick: () => actions.createBranch(r.name) });
-      if (remotes.length) items.push({ label: `Push Tag to ${remotes[0].name}`, onClick: () => actions.pushTag(r.name) });
-      items.push('separator');
-      items.push({ label: `Delete Tag "${r.name}"…`, danger: true, onClick: () => actions.deleteTag(r.name) });
-    }
-    items.push('separator', { label: 'Copy Name', onClick: () => copyText(r.name) });
-    ui.menu(e, items);
-  };
-
   const renderTree = (node: TreeNode, depth: number, keyPrefix: string, icon: ReactNode): ReactNode[] => {
     const entries = [...node.children.values()].sort((a, b) => {
       const af = a.children.size > 0 && !a.ref;
@@ -140,32 +126,7 @@ export function Sidebar() {
     return entries.flatMap((child) => {
       const key = `${keyPrefix}${child.path}`;
       const out: ReactNode[] = [];
-      if (child.ref) {
-        const r = child.ref;
-        const v: View = { kind: 'history', ref: r.ref, label: r.name };
-        out.push(
-          <div
-            key={key}
-            className={`sidebar-item ${isActive(v) ? 'active' : ''} ${r.current ? 'current' : ''}`}
-            style={{ paddingLeft: 12 + depth * 14 }}
-            onClick={() => setView(v)}
-            onDoubleClick={() => r.type !== 'tag' && actions.checkout(r)}
-            onContextMenu={(e) => refMenu(e, r)}
-            title={r.upstream ? `${r.name} → ${r.upstream}${r.upstreamGone ? ' (gone)' : ''}` : r.name}
-          >
-            {icon}
-            <span className="sidebar-label">{child.name}</span>
-            {r.current && <span className="current-dot" title="Checked out" />}
-            {(!!r.ahead || !!r.behind) && (
-              <span className="ahead-behind">
-                {!!r.behind && <span title={`${r.behind} behind ${r.upstream}`}>↓{r.behind}</span>}
-                {!!r.ahead && <span title={`${r.ahead} ahead of ${r.upstream}`}>↑{r.ahead}</span>}
-              </span>
-            )}
-            {r.upstreamGone && <span className="gone-badge" title="Upstream branch was deleted">gone</span>}
-          </div>,
-        );
-      }
+      if (child.ref) out.push(...renderRef(child.ref, child.name, depth, key, icon));
       if (child.children.size) {
         const open = !collapsed.has(key) || !!f;
         out.push(
@@ -181,11 +142,48 @@ export function Sidebar() {
     });
   };
 
-  const section = (id: string, title: string, count: number, body: ReactNode, action?: ReactNode) => {
-    const open = !collapsed.has(`section:${id}`) || !!f;
+  /** One branch/tag row, followed by the branches stacked on it (indented, newest stack first). */
+  const renderRef = (r: Ref, label: string, depth: number, key: string, icon: ReactNode, seen = new Set<string>()): ReactNode[] => {
+    const v: View = { kind: 'history', ref: r.ref, label: r.name };
+    const out: ReactNode[] = [
+      <div
+        key={key}
+        className={`sidebar-item ${isActive(v) ? 'active' : ''} ${r.current ? 'current' : ''}`}
+        style={{ paddingLeft: 12 + depth * 14 }}
+        onClick={() => setView(v)}
+        onDoubleClick={() => r.type !== 'tag' && !r.worktree && actions.checkout(r)}
+        onContextMenu={(e) => refMenu(e, r)}
+        title={[r.upstream ? `${r.name} → ${r.upstream}${r.upstreamGone ? ' (gone)' : ''}` : r.name, r.parent ? `stacked on ${r.parent}` : '', r.worktree ? `checked out in ${r.worktree}` : '']
+          .filter(Boolean)
+          .join('\n')}
+      >
+        {icon}
+        <span className="sidebar-label">{label}</span>
+        {r.current && <span className="current-dot" title="Checked out" />}
+        {r.worktree && <FolderGit2 size={11} className="muted" />}
+        {(!!r.ahead || !!r.behind) && (
+          <span className="ahead-behind">
+            {!!r.behind && <span title={`${r.behind} behind ${r.upstream}`}>↓{r.behind}</span>}
+            {!!r.ahead && <span title={`${r.ahead} ahead of ${r.upstream}`}>↑{r.ahead}</span>}
+          </span>
+        )}
+        {r.upstreamGone && <span className="gone-badge" title="Upstream branch was deleted">gone</span>}
+      </div>,
+    ];
+    if (r.type === 'head' && !f && !seen.has(r.name)) {
+      seen.add(r.name);
+      for (const c of stackChildren.get(r.name) ?? []) {
+        out.push(...renderRef(c, c.name, depth + 1, `${key}>${c.name}`, <Layers size={13} className="ref-icon stack" />, seen));
+      }
+    }
+    return out;
+  };
+
+  const section = (id: string, title: string, count: number, body: ReactNode, action?: ReactNode, closedByDefault = false) => {
+    const open = (closedByDefault ? collapsed.has(`section-open:${id}`) : !collapsed.has(`section:${id}`)) || !!f;
     return (
       <div className="sidebar-section">
-        <div className="sidebar-section-header" onClick={() => toggle(`section:${id}`)}>
+        <div className="sidebar-section-header" onClick={() => toggle(closedByDefault ? `section-open:${id}` : `section:${id}`)}>
           {open ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
           <span>{title}</span>
           <span className="sidebar-count">{count || ''}</span>
@@ -218,12 +216,61 @@ export function Sidebar() {
         {section(
           'branches',
           'Branches',
-          heads.length,
-          heads.length ? renderTree(headTree, 0, 'head:', <GitBranch size={13} className="ref-icon" />) : <div className="sidebar-empty">No branches yet</div>,
+          allHeads.length - archived.length,
+          allHeads.length - archived.length ? (
+            <>
+              {pinned.filter(match).flatMap((r) => renderRef(r, r.name, 0, `pin:${r.name}`, <Pin size={13} className="ref-icon pinned" />))}
+              {renderTree(headTree, 0, 'head:', <GitBranch size={13} className="ref-icon" />)}
+            </>
+          ) : (
+            <div className="sidebar-empty">No branches yet</div>
+          ),
           <button className="icon-button" title="New branch" onClick={() => actions.createBranch()}>
             <Plus size={13} />
           </button>,
         )}
+
+        {archived.length > 0 &&
+          section(
+            'archived',
+            'Archived',
+            archived.length,
+            renderTree(archivedTree, 0, 'archived:', <Archive size={13} className="ref-icon archived" />),
+            undefined,
+            true,
+          )}
+
+        {worktrees.length > 1 &&
+          section(
+            'worktrees',
+            'Worktrees',
+            worktrees.length,
+            worktrees.map((wt) => (
+              <div
+                key={wt.path}
+                className={`sidebar-item ${wt.current ? 'current' : ''}`}
+                style={{ paddingLeft: 12 }}
+                title={`${wt.path}${wt.branch ? `\n${wt.branch}` : wt.detached ? '\ndetached HEAD' : ''}${wt.prunable ? `\nmissing: ${wt.prunable}` : ''}`}
+                onDoubleClick={() => !wt.current && !wt.prunable && app.openRepo(wt.path)}
+                onContextMenu={(e) =>
+                  ui.menu(e, [
+                    { label: 'Open in New Tab', disabled: wt.current || !!wt.prunable, onClick: () => app.openRepo(wt.path) },
+                    { label: 'Reveal in Finder', disabled: !!wt.prunable, onClick: () => api.reveal(wt.path).catch(() => undefined) },
+                    { label: 'Copy Path', onClick: () => copyText(wt.path) },
+                    'separator',
+                    { label: 'Remove Worktree…', danger: true, disabled: wt.current || wt.bare, onClick: () => actions.removeWorktree(wt) },
+                    { label: 'Prune Missing Worktrees', onClick: () => actions.pruneWorktrees() },
+                  ])
+                }
+              >
+                <FolderGit2 size={13} className="ref-icon" />
+                <span className="sidebar-label">{wt.path.slice(wt.path.lastIndexOf('/') + 1)}</span>
+                <span className="muted small sidebar-detail">{wt.branch ?? (wt.detached ? 'detached' : '')}</span>
+                {wt.current && <span className="current-dot" title="This tab" />}
+                {wt.prunable && <span className="gone-badge">missing</span>}
+              </div>
+            )),
+          )}
 
         {section(
           'remotes',
