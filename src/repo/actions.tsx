@@ -65,10 +65,10 @@ export function useActions() {
       async pull() {
         if (!status?.branch) return ui.toast('warning', 'Cannot pull in detached HEAD state');
         if (!status.upstream) return ui.toast('warning', `"${status.branch}" has no upstream branch`, 'Push the branch first, or set an upstream from the sidebar.');
-        const before = await api.snapshot(path);
         return run('Pulling…', () => api.pull(path, getSetting('pullRebase')), {
           success: `Pulled ${status.upstream}`,
-          undo: (r) => (r?.conflicts ? null : undoHeadMove('Pull', before)()),
+          snapshot: true,
+          undo: (r, before) => (r?.conflicts ? null : undoHeadMove('Pull', before)()),
         });
       },
 
@@ -114,24 +114,20 @@ export function useActions() {
       // ------------------------------------------------------------ staging
       async stage(paths: string[]) {
         if (!paths.length) return;
-        const before = await api.snapshot(path);
-        return run('Staging…', () => api.stage(path, paths), { undo: undoIndex('Stage', before) });
+        return run('Staging…', () => api.stage(path, paths), { snapshot: true, undo: (_r, before) => undoIndex('Stage', before)() });
       },
 
       async unstage(paths: string[]) {
         if (!paths.length) return;
-        const before = await api.snapshot(path);
-        return run('Unstaging…', () => api.unstage(path, paths), { undo: undoIndex('Unstage', before) });
+        return run('Unstaging…', () => api.unstage(path, paths), { snapshot: true, undo: (_r, before) => undoIndex('Unstage', before)() });
       },
 
       async stageAll() {
-        const before = await api.snapshot(path);
-        return run('Staging…', () => api.stageAll(path), { undo: undoIndex('Stage All', before) });
+        return run('Staging…', () => api.stageAll(path), { snapshot: true, undo: (_r, before) => undoIndex('Stage All', before)() });
       },
 
       async unstageAll() {
-        const before = await api.snapshot(path);
-        return run('Unstaging…', () => api.unstageAll(path), { undo: undoIndex('Unstage All', before) });
+        return run('Unstaging…', () => api.unstageAll(path), { snapshot: true, undo: (_r, before) => undoIndex('Unstage All', before)() });
       },
 
       async applyPatch(diff: FileDiff, selection: LineSelection, action: PatchAction, unidiffZero = false) {
@@ -145,10 +141,10 @@ export function useActions() {
           });
           if (!ok) return;
         }
-        const before = await api.snapshot(path, action === 'discard' ? [file] : undefined);
         const label = action === 'stage' ? 'Stage Lines' : action === 'unstage' ? 'Unstage Lines' : 'Discard Lines';
         return run(action === 'stage' ? 'Staging…' : action === 'unstage' ? 'Unstaging…' : 'Discarding…', () => api.applyPatch(path, diff, selection, action, unidiffZero), {
-          undo: () => (action === 'discard' ? { label, spec: { kind: 'files', snapshot: before } } : undoIndex(label, before)()),
+          snapshot: action === 'discard' ? [file] : true,
+          undo: (_r, before) => (action === 'discard' ? { label, spec: { kind: 'files', snapshot: before } } : undoIndex(label, before)()),
           success: action === 'discard' ? 'Changes discarded' : undefined,
         });
       },
@@ -164,15 +160,14 @@ export function useActions() {
           danger: true,
         });
         if (!ok) return;
-        const before = await api.snapshot(path, pathsOf(files));
         return run('Discarding…', () => api.discard(path, files), {
           success: `Discarded ${files.length === 1 ? files[0].path : plural(files.length, 'file')}`,
-          undo: () => ({ label: 'Discard', spec: { kind: 'files', snapshot: before } }),
+          snapshot: pathsOf(files),
+          undo: (_r, before) => ({ label: 'Discard', spec: { kind: 'files', snapshot: before } }),
         });
       },
 
       async commit(message: string, opts: { amend?: boolean; stageAll?: boolean; undoable?: boolean; signoff?: boolean } = {}) {
-        const before = await api.snapshot(path);
         const subject = message.split('\n')[0];
         return run(
           opts.amend ? 'Amending commit…' : 'Committing…',
@@ -183,7 +178,8 @@ export function useActions() {
           },
           {
             success: opts.amend ? 'Commit amended' : `Committed “${subject}”`,
-            undo: async () => {
+            snapshot: true,
+            undo: async (_r, before) => {
               // A soft reset can't restore MERGE_HEAD, so merge commits aren't undoable this way.
               if (opts.undoable === false) return null;
               const after = await currentHead();
@@ -212,10 +208,10 @@ export function useActions() {
         });
         if (!v) return;
         const name = String(v.name).trim();
-        const before = await api.snapshot(path);
         return run('Creating branch…', () => api.createBranch(path, name, start, !!v.checkout), {
           success: v.checkout ? `Created and checked out ${name}` : `Created ${name}`,
-          undo: async () => {
+          snapshot: true,
+          undo: async (_r, before) => {
             const entry = v.checkout ? await undoCheckout(before, name)() : await undoCreateRef('Create Branch', `refs/heads/${name}`)();
             return entry && { ...entry, label: 'Create Branch' };
           },
@@ -223,17 +219,17 @@ export function useActions() {
       },
 
       async checkout(ref: Ref) {
-        const before = await api.snapshot(path);
         if (ref.type === 'head') {
           if (ref.current) return;
-          return run(`Checking out ${ref.name}…`, () => api.checkout(path, ref.name), { success: `Checked out ${ref.name}`, undo: undoCheckout(before) });
+          return run(`Checking out ${ref.name}…`, () => api.checkout(path, ref.name), { success: `Checked out ${ref.name}`, snapshot: true, undo: (_r, before) => undoCheckout(before)() });
         }
         if (ref.type === 'remote') {
           const local = ref.name.slice((ref.remote?.length ?? 0) + 1);
           const existed = localExists(local);
           return run(`Checking out ${local}…`, () => api.checkoutRemote(path, ref.name, local), {
             success: existed ? `Checked out ${local}` : `Created ${local} tracking ${ref.name}`,
-            undo: undoCheckout(before, existed ? undefined : local),
+            snapshot: true,
+            undo: (_r, before) => undoCheckout(before, existed ? undefined : local)(),
           });
         }
         return actions.checkoutDetached(ref.name, `tag ${ref.name}`);
@@ -246,10 +242,10 @@ export function useActions() {
           confirmLabel: 'Check Out',
         });
         if (!ok) return;
-        const before = await api.snapshot(path);
         return run('Checking out…', () => api.checkoutDetached(path, rev), {
           success: `Checked out ${label}`,
-          undo: undoCheckout(before),
+          snapshot: true,
+          undo: (_r, before) => undoCheckout(before)(),
         });
       },
 
@@ -397,10 +393,10 @@ export function useActions() {
           confirmLabel: 'Merge',
         });
         if (!v) return;
-        const before = await api.snapshot(path);
         return run(`Merging ${name}…`, () => api.merge(path, name, { noFF: v.mode === 'noff', squash: v.mode === 'squash' }), {
           success: v.mode === 'squash' ? `Squashed ${name} — review and commit the staged changes` : `Merged ${name} into ${status.branch}`,
-          undo: (r) => (r?.conflicts || v.mode === 'squash' ? null : undoHeadMove('Merge', before)()),
+          snapshot: true,
+          undo: (r, before) => (r?.conflicts || v.mode === 'squash' ? null : undoHeadMove('Merge', before)()),
         });
       },
 
@@ -417,10 +413,10 @@ export function useActions() {
           confirmLabel: 'Rebase',
         });
         if (!ok) return;
-        const before = await api.snapshot(path);
         return run(`Rebasing onto ${onto}…`, () => api.rebase(path, onto), {
           success: `Rebased ${status.branch} onto ${onto}`,
-          undo: (r) => (r?.conflicts ? null : undoHeadMove('Rebase', before)()),
+          snapshot: true,
+          undo: (r, before) => (r?.conflicts ? null : undoHeadMove('Rebase', before)()),
         });
       },
 
@@ -446,10 +442,10 @@ export function useActions() {
       },
 
       async runRebase(base: string | null, steps: RebaseStep[]) {
-        const before = await api.snapshot(path);
         return run('Rebasing…', () => api.rebaseInteractive(path, base, steps), {
           success: (r) => (r?.paused ? 'Rebase paused — amend the commit, then click Continue' : 'Interactive rebase complete'),
-          undo: (r) => (r?.conflicts || r?.paused ? null : undoHeadMove('Interactive Rebase', before)()),
+          snapshot: true,
+          undo: (r, before) => (r?.conflicts || r?.paused ? null : undoHeadMove('Interactive Rebase', before)()),
         });
       },
 
@@ -468,11 +464,11 @@ export function useActions() {
         if (!v) return;
         const message = String(v.body).trim() ? `${String(v.subject).trim()}\n\n${String(v.body).trim()}` : String(v.subject).trim();
         if (c.hash === status?.head) {
-          const before = await api.snapshot(path);
           // --only: change just the message; staged changes stay staged and out of the commit.
           return run('Rewording…', () => api.commit(path, message, true, { only: true }), {
             success: 'Commit message updated',
-            undo: async () => {
+            snapshot: true,
+            undo: async (_r, before) => {
               const after = await currentHead();
               if (!before.head || !after || after === before.head) return null;
               return { label: 'Edit Message', spec: { kind: 'head-reset', from: after, to: before.head, mode: 'soft', branch: before.branch } };
@@ -562,10 +558,10 @@ export function useActions() {
       async stashApply(s: Stash, pop: boolean) {
         const diffs = await api.stashDiff(path, s.ref).catch(() => [] as FileDiff[]);
         const touched = diffs.flatMap((d) => [d.oldPath, d.newPath]).filter(Boolean);
-        const before = await api.snapshot(path, touched);
         return run(pop ? 'Popping stash…' : 'Applying stash…', () => api.stashApply(path, s.ref, pop), {
           success: pop ? 'Stash applied and removed' : 'Stash applied',
-          undo: (r) =>
+          snapshot: touched,
+          undo: (r, before) =>
             r?.conflicts
               ? null
               : {
@@ -647,10 +643,10 @@ export function useActions() {
 
       // ------------------------------------------------------- commit actions
       async cherryPick(c: Commit) {
-        const before = await api.snapshot(path);
         return run('Cherry-picking…', () => api.cherryPick(path, c.hash), {
           success: `Cherry-picked ${shortHash(c.hash)} onto ${headName}`,
-          undo: (r) => (r?.conflicts ? null : undoHeadMove('Cherry-Pick', before)()),
+          snapshot: true,
+          undo: (r, before) => (r?.conflicts ? null : undoHeadMove('Cherry-Pick', before)()),
         });
       },
 
@@ -665,10 +661,10 @@ export function useActions() {
           confirmLabel: 'Revert',
         });
         if (!ok) return;
-        const before = await api.snapshot(path);
         return run('Reverting…', () => api.revert(path, c.hash, c.parents.length > 1 ? 1 : undefined), {
           success: `Reverted ${shortHash(c.hash)}`,
-          undo: (r) => (r?.conflicts ? null : undoHeadMove('Revert', before)()),
+          snapshot: true,
+          undo: (r, before) => (r?.conflicts ? null : undoHeadMove('Revert', before)()),
         });
       },
 
@@ -702,10 +698,10 @@ export function useActions() {
           });
           if (!sure) return;
         }
-        const before = await api.snapshot(path);
         return run('Resetting…', () => api.reset(path, c.hash, mode), {
           success: `Reset ${headName} to ${shortHash(c.hash)}`,
-          undo: async () => {
+          snapshot: true,
+          undo: async (_r, before) => {
             const after = await currentHead();
             if (!before.head || !after) return null;
             // A hard reset discarded the local changes for good; for the others, the old index comes back too.
@@ -873,10 +869,10 @@ export function useActions() {
         if (!v) return;
         const pattern = String(v.pattern).trim();
         const untrack = info.tracked && !!v.untrack ? [filePath] : [];
-        const before = await api.snapshot(path);
         return run('Ignoring…', () => api.ignoreAdd(path, [pattern], v.target === 'exclude' ? 'exclude' : 'gitignore', untrack), {
           success: (r) => (r.before === r.after && !untrack.length ? `“${pattern}” was already ignored` : `Ignored ${pattern}`),
-          undo: (r) =>
+          snapshot: true,
+          undo: (r, before) =>
             r && (r.before !== r.after || untrack.length)
               ? { label: 'Ignore', spec: { kind: 'ignore', file: r.file, before: r.before, after: r.after, index: untrack.length ? before.index : null, head: before.head } }
               : null,

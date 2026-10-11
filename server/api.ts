@@ -29,7 +29,7 @@ import type {
   Status,
   Submodule,
 } from '../shared/types.ts';
-import { git, GitError, gitRaw, hashFiles } from './git.ts';
+import { git, GitError, gitRaw, hashFiles, writeTree } from './git.ts';
 import {
   FILE_LOG_FORMAT,
   FS,
@@ -918,7 +918,9 @@ export function createApi(host: Host): Record<string, Handler> {
         git(repo, ['rev-parse', '--verify', '-q', 'HEAD']).then((s) => s.trim() || null, () => null),
         // Not --short: that turns "main" into "heads/main" when a tag of the same name exists.
         git(repo, ['symbolic-ref', '-q', 'HEAD']).then((s) => s.trim().replace(/^refs\/heads\//, '') || null, () => null),
-        git(repo, ['write-tree']).then((s) => s.trim() || null, () => null),
+        // Throws (instead of a silent null) when another process holds index.lock: an undo
+        // recorded without the index would quietly lose staged changes.
+        writeTree(repo),
       ]);
       const snapshot: Snapshot = { head, branch, index };
       if (paths?.length) {
@@ -952,8 +954,9 @@ export function createApi(host: Host): Record<string, Handler> {
           assertHash(f.blob);
           const data = await gitRaw(repo, ['cat-file', 'blob', f.blob]);
           await fs.mkdir(path.dirname(abs), { recursive: true });
-          // Write next to the file and rename into place, so a failed write (disk full…) never leaves it truncated.
-          const tmp = path.join(path.dirname(abs), `.${path.basename(abs)}.${randomUUID()}.gitcolumn-tmp`);
+          // Write next to the file and rename into place, so a failed write (disk full…) never leaves it
+          // truncated. A short name: a long file name plus a suffix could exceed the name length limit.
+          const tmp = path.join(path.dirname(abs), `.gitcolumn-${randomUUID().slice(0, 8)}.tmp`);
           try {
             await fs.writeFile(tmp, data, { mode: f.mode ?? 0o644 });
             if (f.mode) await fs.chmod(tmp, f.mode);

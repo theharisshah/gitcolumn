@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import type { Ref, Remote, RepoInfo, Stash, Status, Submodule, UndoSpec, UndoState } from '../../shared/types';
+import type { Ref, Remote, RepoInfo, Snapshot, Stash, Status, Submodule, UndoSpec, UndoState } from '../../shared/types';
 import { api, type ConflictResult } from '../lib/api';
 import { draftFromMessage, loadDraft, saveDraft } from '../lib/draft';
 import { modKey } from '../lib/format';
@@ -25,9 +25,16 @@ export interface RunOptions<T> {
   success?: string | ((result: T) => string | undefined);
   /** Skip the refresh afterwards */
   noRefresh?: boolean;
+  /**
+   * Snapshot HEAD and the index right before the operation runs (in the queue, so earlier operations
+   * are already done); with paths, also those working tree files. Passed to `undo`.
+   */
+  snapshot?: boolean | string[];
   /** Build an undo entry once the operation succeeded */
-  undo?: (result: T) => Promise<UndoEntry | null | undefined> | UndoEntry | null | undefined;
+  undo?: (result: T, before: Snapshot) => Promise<UndoEntry | null | undefined> | UndoEntry | null | undefined;
 }
+
+const NO_SNAPSHOT: Snapshot = { head: null, branch: null, index: null };
 
 export interface RepoCtx {
   repo: RepoInfo;
@@ -191,18 +198,28 @@ export function RepoProvider({ repo, active = true, children }: { repo: RepoInfo
 
   const undoRef = useRef<(id?: string) => Promise<void>>(async () => undefined);
 
+  // Operations (and undos) run one at a time, in the order they were started: a shortcut pressed while
+  // something runs waits instead of racing it, and each snapshot sees the result of the one before.
+  const queue = useRef<Promise<unknown>>(Promise.resolve());
+  const enqueue = useCallback(<T,>(task: () => Promise<T>): Promise<T> => {
+    const next = queue.current.then(task, task);
+    queue.current = next.catch(() => undefined);
+    return next;
+  }, []);
+
   const run = useCallback(
-    async <T,>(label: string, fn: () => Promise<T>, opts: RunOptions<T> = {}): Promise<T | undefined> => {
+    <T,>(label: string, fn: () => Promise<T>, opts: RunOptions<T> = {}): Promise<T | undefined> => enqueue(async () => {
       busyRef.current = true;
       setBusy(label);
       try {
+        const before = opts.snapshot ? await api.snapshot(repo.path, Array.isArray(opts.snapshot) ? opts.snapshot : undefined) : NO_SNAPSHOT;
         const result = await fn();
         const cr = result as unknown as ConflictResult | undefined;
         let entry: UndoEntry | null | undefined = null;
         let undoId: string | undefined;
         if (opts.undo) {
           try {
-            entry = await opts.undo(result);
+            entry = await opts.undo(result, before);
           } catch {
             entry = null;
           }
@@ -234,8 +251,8 @@ export function RepoProvider({ repo, active = true, children }: { repo: RepoInfo
         setBusy(null);
         if (!opts.noRefresh) await load(true);
       }
-    },
-    [load, ui, repo.path, setView],
+    }),
+    [load, ui, repo.path, setView, enqueue],
   );
 
   const restoreMessage = useCallback(
@@ -252,54 +269,48 @@ export function RepoProvider({ repo, active = true, children }: { repo: RepoInfo
     [repo.path, ui],
   );
 
-  /** Undo the newest journal entry; with `expectedId`, only if that entry is still the newest. */
+  /** Undo the newest journal entry; with `expectedId`, only if that entry is still the newest. Queued like any operation. */
   const undo = useCallback(
-    async (expectedId?: string) => {
-      const state = await api.undoState(repo.path).catch(() => null);
-      if (state) setUndoState(state);
-      const top = state?.top;
-      if (!top) {
-        ui.toast('info', 'Nothing to undo');
-        return;
-      }
-      if (busyRef.current) {
-        ui.toast('info', 'Wait for the current operation to finish, then undo.');
-        return;
-      }
-      if (expectedId && top.id !== expectedId) {
-        ui.toast('info', 'That action can no longer be undone from here', `${modKey}Z would undo “${top.label}” instead.`);
-        return;
-      }
-      busyRef.current = true;
-      setBusy(`Undoing ${top.label}…`);
-      try {
-        const result = await api.undoRun(repo.path, top.id);
-        setUndoState(result.state);
-        if (result.conflicts) ui.toast('warning', `Undid ${result.label} with conflicts`, 'Resolve the conflicted files in the Working Copy.');
-        else ui.toast('success', `Undid ${result.label}`, result.note);
-        if (result.restoreMessage) restoreMessage(result.restoreMessage);
-      } catch (e) {
-        const after = await api.undoState(repo.path).catch(() => null);
-        if (after) setUndoState(after);
-        const kept = after?.top?.id === top.id;
-        ui.toast(
-          'error',
-          `Couldn't undo ${top.label}`,
-          e instanceof Error ? e.message : String(e),
-          kept ? { label: 'Skip It', onClick: () => void api.undoDrop(repo.path, top.id).then(setUndoState, () => undefined) } : undefined,
-        );
-      } finally {
-        busyRef.current = false;
-        setBusy(null);
-        await load(true);
-      }
-    },
-    [ui, repo.path, load, restoreMessage],
+    (expectedId?: string) =>
+      enqueue(async () => {
+        const state = await api.undoState(repo.path).catch(() => null);
+        if (state) setUndoState(state);
+        const top = state?.top;
+        if (!top) {
+          ui.toast('info', 'Nothing to undo');
+          return;
+        }
+        if (expectedId && top.id !== expectedId) {
+          ui.toast('info', 'That action can no longer be undone from here', `${modKey}Z would undo “${top.label}” instead.`);
+          return;
+        }
+        busyRef.current = true;
+        setBusy(`Undoing ${top.label}…`);
+        try {
+          const result = await api.undoRun(repo.path, top.id);
+          setUndoState(result.state);
+          if (result.conflicts) ui.toast('warning', `Undid ${result.label} with conflicts`, 'Resolve the conflicted files in the Working Copy.');
+          else ui.toast('success', `Undid ${result.label}`, result.note);
+          if (result.restoreMessage) restoreMessage(result.restoreMessage);
+        } catch (e) {
+          const after = await api.undoState(repo.path).catch(() => null);
+          if (after) setUndoState(after);
+          const kept = after?.top?.id === top.id;
+          const skip = () =>
+            void api.undoDrop(repo.path, top.id).then(setUndoState, (err) => ui.toast('error', 'Couldn’t skip it', err instanceof Error ? err.message : String(err)));
+          ui.toast('error', `Couldn't undo ${top.label}`, e instanceof Error ? e.message : String(e), kept ? { label: 'Skip It', onClick: skip } : undefined);
+        } finally {
+          busyRef.current = false;
+          setBusy(null);
+          await load(true);
+        }
+      }),
+    [ui, repo.path, load, restoreMessage, enqueue],
   );
   const clearUndo = useCallback(async () => {
-    await api.undoClear(repo.path).catch(() => undefined);
+    await api.undoClear(repo.path).catch((err) => ui.toast('error', 'Couldn’t clear the undo history', err instanceof Error ? err.message : String(err)));
     await loadUndo();
-  }, [repo.path, loadUndo]);
+  }, [repo.path, loadUndo, ui]);
   undoRef.current = undo;
 
   const currentBranch = useMemo(() => refs.find((r) => r.type === 'head' && r.current), [refs]);

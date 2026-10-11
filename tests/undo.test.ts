@@ -370,8 +370,9 @@ describe('persistent undo', () => {
     await push('Stage', { kind: 'index', tree: before.index!, head: before.head });
     write('a.txt', 'staged differently\n');
     sh(repo, 'add', 'a.txt');
-    await assert.rejects(undoAfterRestart(), /staging area changed/);
+    await assert.rejects(undoAfterRestart(), /staged or unstaged since then/);
     assert.equal(sh(repo, 'show', ':a.txt'), 'staged differently');
+    assert.equal(await count(), 1, 'kept: unstaging those changes makes it possible again');
   });
 
   test('permanent failures are dropped instead of blocking the stack', async () => {
@@ -585,16 +586,24 @@ describe('persistent undo', () => {
     sh(repo, 'config', 'remote.origin.prune', 'true');
     const config = await call<[string, string][]>('config.remoteEntries', { repo, name: 'origin' });
     const refs = await call<[string, string][]>('refs.remoteTracking', { repo, name: 'origin' });
-    assert.deepEqual(refs.map(([r]) => r), ['refs/remotes/origin/main']);
+    const head = refs.find(([r]) => r === 'refs/remotes/origin/HEAD');
+    assert.ok(refs.some(([r]) => r === 'refs/remotes/origin/main'));
     sh(repo, 'remote', 'remove', 'origin');
     await push('Remove Remote', { kind: 'remote-remove', name: 'origin', config, refs });
     await undoAfterRestart();
     assert.equal(sh(repo, 'config', 'branch.main.pushRemote'), 'origin');
     assert.equal(sh(repo, 'config', 'remote.pushDefault'), 'origin');
     assert.equal(sh(repo, 'config', 'remote.origin.prune'), 'true');
-    assert.equal(sh(repo, 'rev-parse', 'origin/main'), head());
-    await push('Bad', { kind: 'remote-remove', name: 'evil', config: [['remote.evil.uploadpack', 'touch /tmp/pwned']] });
-    await assert.rejects(undoAfterRestart(), /not allowed/);
+    assert.equal(sh(repo, 'rev-parse', 'refs/remotes/origin/main'), sh(repo, 'rev-parse', 'HEAD'));
+    if (head) assert.equal(sh(repo, 'symbolic-ref', 'refs/remotes/origin/HEAD'), head[1].slice('ref:'.length));
+    sh(repo, 'remote', 'remove', 'origin');
+    const r = await (async () => {
+      await push('Bad', { kind: 'remote-remove', name: 'evil', config: [['remote.evil.url', 'https://example.com/e.git'], ['remote.evil.uploadpack', 'touch /tmp/pwned']] });
+      return undoAfterRestart();
+    })();
+    assert.match(r.note ?? '', /Not restored.*remote\.evil\.uploadpack/);
+    assert.throws(() => sh(repo, 'config', 'remote.evil.uploadpack'));
+    assert.equal(sh(repo, 'config', 'remote.evil.url'), 'https://example.com/e.git');
   });
 
   test('a pull that succeeds but leaves conflicts (autostash) reports them', async () => {
@@ -613,6 +622,127 @@ describe('persistent undo', () => {
     write('a.txt', 'mine, uncommitted\n');
     const r = await call<{ conflicts: boolean }>('pull', { repo, rebase: true });
     assert.equal(r.conflicts, true);
+  });
+
+  test('an unmerged file named like a lock file is a conflict, not lock contention', async () => {
+    write('yarn.lock', 'base\n');
+    sh(repo, 'add', '-A');
+    sh(repo, 'commit', '-q', '-m', 'lock');
+    const before = await snapshot();
+    write('x.txt', 'x\n');
+    sh(repo, 'add', 'x.txt');
+    await push('Stage', { kind: 'index', tree: before.index!, head: before.head });
+    sh(repo, 'reset', '-q');
+    sh(repo, 'switch', '-q', '-c', 'other');
+    write('yarn.lock', 'theirs\n');
+    sh(repo, 'commit', '-qam', 'theirs');
+    sh(repo, 'switch', '-q', 'main');
+    write('yarn.lock', 'ours\n');
+    sh(repo, 'commit', '-qam', 'ours');
+    try {
+      sh(repo, 'merge', '-q', 'other');
+    } catch {
+      /* conflict expected */
+    }
+    const t0 = Date.now();
+    await assert.rejects(undoAfterRestart(), /unresolved conflicts|changed since then/);
+    assert.ok(Date.now() - t0 < 1000, 'no waiting for a lock that does not exist');
+    sh(repo, 'merge', '--abort');
+  });
+
+  test('a snapshot taken while another process holds index.lock fails instead of losing the index', async () => {
+    const lock = path.join(repo, '.git', 'index.lock');
+    writeFileSync(lock, '');
+    try {
+      await assert.rejects(snapshot(), /Another git process/);
+    } finally {
+      rmSync(lock);
+    }
+  });
+
+  test('files with very long names are restored (short temp names)', async () => {
+    const long = `${'n'.repeat(240)}.txt`;
+    write(long, 'precious\n');
+    const before = await snapshot([long]);
+    rmSync(path.join(repo, long));
+    await push('Discard', { kind: 'files', snapshot: before });
+    await undoAfterRestart();
+    assert.equal(read(long), 'precious\n');
+  });
+
+  test('a discard that left a symlink (typechange) is undone by replacing the link', async () => {
+    symlinkSync('a.txt', path.join(repo, 'link'));
+    sh(repo, 'add', 'link');
+    sh(repo, 'commit', '-q', '-m', 'link');
+    rmSync(path.join(repo, 'link'));
+    write('link', 'now a file\n');
+    const before = await snapshot(['link']);
+    sh(repo, 'checkout', '--', 'link'); // the discard brings the symlink back
+    await push('Discard', { kind: 'files', snapshot: before });
+    await undoAfterRestart();
+    assert.equal(read('link'), 'now a file\n');
+  });
+
+  test('remove remote resumes when the remote came back halfway', async () => {
+    sh(repo, 'remote', 'add', 'origin', 'https://example.com/r.git');
+    sh(repo, 'config', 'remote.origin.pushurl', 'https://example.com/push.git');
+    const config = await call<[string, string][]>('config.remoteEntries', { repo, name: 'origin' });
+    sh(repo, 'remote', 'remove', 'origin');
+    await push('Remove Remote', { kind: 'remote-remove', name: 'origin', config });
+    sh(repo, 'config', 'remote.origin.url', 'https://example.com/r.git'); // as if the first attempt stopped here
+    await undoAfterRestart();
+    assert.equal(sh(repo, 'config', 'remote.origin.pushurl'), 'https://example.com/push.git');
+    assert.equal(sh(repo, 'config', '--get-all', 'remote.origin.url'), 'https://example.com/r.git', 'not added twice');
+
+    sh(repo, 'remote', 'remove', 'origin');
+    await push('Remove Remote', { kind: 'remote-remove', name: 'origin', config });
+    sh(repo, 'remote', 'add', 'origin', 'https://elsewhere.example/other.git');
+    await assert.rejects(undoAfterRestart(), /exists again/);
+  });
+
+  test('branch rename resumes after the settings could not be moved', async () => {
+    sh(repo, 'branch', 'old');
+    sh(repo, 'config', 'branch.old.remote', 'origin');
+    sh(repo, 'branch', '-m', 'old', 'new');
+    await push('Rename', { kind: 'branch-rename', from: 'old', to: 'new', hash: head() });
+    sh(repo, 'branch', '-m', 'new', 'old'); // ref renamed back…
+    sh(repo, 'config', '--rename-section', 'branch.old', 'branch.new'); // …but the settings stayed behind
+    await undoAfterRestart();
+    assert.equal(sh(repo, 'config', 'branch.old.remote'), 'origin');
+  });
+
+  test('when refs are already in place, settings are only filled in, not overwritten', async () => {
+    const hash = head();
+    sh(repo, 'branch', 'feature');
+    await push('Delete Branch', { kind: 'refs', updates: [{ ref: 'refs/heads/feature', old: null, new: hash }], config: [['branch.feature.remote', 'origin'], ['branch.feature.merge', 'refs/heads/feature']] });
+    sh(repo, 'config', 'branch.feature.remote', 'fork'); // the user re-created it and set it up differently
+    await undoAfterRestart();
+    assert.equal(sh(repo, 'config', 'branch.feature.remote'), 'fork');
+    assert.equal(sh(repo, 'config', 'branch.feature.merge'), 'refs/heads/feature');
+  });
+
+  test('a stash that fails to re-apply is not retried (it stays in the list)', async () => {
+    write('u.txt', 'stashed untracked\n');
+    sh(repo, 'stash', 'push', '-q', '-u');
+    const hash = sh(repo, 'rev-parse', 'refs/stash');
+    await push('Stash', { kind: 'stash-save', hash });
+    write('u.txt', 'in the way\n');
+    await assert.rejects(undoAfterRestart(), /still in the list/);
+    assert.equal(await count(), 0);
+    assert.equal(sh(repo, 'rev-parse', 'refs/stash'), hash);
+  });
+
+  test('checkout undo waits while the old branch is checked out in another worktree', async () => {
+    const before = await snapshot();
+    sh(repo, 'switch', '-q', '-c', 'feature');
+    await push('Checkout', { kind: 'checkout', from: { head: before.head, branch: 'main' }, to: { head: head(), branch: 'feature' } });
+    const wt = path.join(path.dirname(repo), 'wt-main');
+    sh(repo, 'worktree', 'add', '-q', wt, 'main');
+    await assert.rejects(undoAfterRestart(), /already used by worktree|already checked out/);
+    assert.equal(await count(), 1);
+    sh(repo, 'worktree', 'remove', wt);
+    await undoAfterRestart();
+    assert.equal(sh(repo, 'symbolic-ref', '--short', 'HEAD'), 'main');
   });
 
   test('a branch with the same name as a tag is still recognised', async () => {

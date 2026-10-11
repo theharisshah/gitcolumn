@@ -4,15 +4,18 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import type { Snapshot, UndoResult, UndoSpec, UndoState } from '../shared/types.ts';
 import type { HandlerModule } from './ctx.ts';
-import { git, GitError, gitRaw, hashFiles } from './git.ts';
+import { git, GitError, gitRaw, hashFiles, IndexLockedError, writeTree } from './git.ts';
 import { ignoreFile } from './ignore.ts';
 import { assertHash, assertRef, assertSafe, insideRepo } from './util.ts';
 
-/** What a path held right after the operation: a blob id, null (absent) or '!' (not a regular file). */
+/**
+ * What a path holds: a blob id, null (absent), 'link' (a symbolic link), 'dir' (a folder) or
+ * '!' (anything else, e.g. a parent folder turned into a file).
+ */
 type PathState = string | null;
 
 interface Guard {
-  /** `git write-tree` right after the operation (null with conflicts) */
+  /** `git write-tree` right after the operation (null with conflicts, '?' when it couldn't be read) */
   index?: string | null;
   files?: { path: string; state: PathState }[];
 }
@@ -57,7 +60,7 @@ const BRANCH_KEY = /^branch\.[^\s]+\.(remote|merge|rebase|pushremote|gitcolumn-[
 // Not uploadpack/receivepack/proxy/vcs: those run programs or redirect traffic, so they are never written back.
 const REMOTE_KEY = (name: string) =>
   new RegExp(
-    `^remote\\.${escapeRegExp(name)}\\.(url|pushurl|fetch|push|tagopt|prune|prunetags|mirror|skipdefaultupdate|skipfetchall|followremotehead|promisor|partialclonefilter|serveroption)$`,
+    `^remote\\.${escapeRegExp(name)}\\.(url|pushurl|fetch|push|tagopt|prune|prunetags|mirror|skipdefaultupdate|skipfetchall|followremotehead|promisor|partialclonefilter|serveroption|lfsurl|lfspushurl|gh-resolved)$`,
     'i',
   );
 const LINK_KEY = /^(branch\.[^\s]+\.(remote|merge|pushremote)|remote\.pushdefault)$/i;
@@ -72,7 +75,9 @@ const TRANSIENT = new RegExp(
     'would be overwritten', 'your local changes', 'untracked working tree files would be', 'commit your changes or stash them',
     'not uptodate', 'cannot switch branch', 'already exists, no checkout', 'would lose untracked', 'would be removed by',
     'in the middle of a merge', 'resolve your current index first', 'needs merge', 'unmerged files',
+    'already used by worktree', 'is already checked out at',
     "\\.lock'?: file exists", "unable to create '[^']*\\.lock'", 'could not lock config file', 'another git process',
+    'unable to write new index file', 'no space left on device',
   ].join('|'),
   'i',
 );
@@ -80,7 +85,7 @@ const TRANSIENT_FS = new Set(['EACCES', 'EPERM', 'EBUSY', 'ENOSPC', 'EMFILE', 'E
 
 function isRetryable(e: unknown): boolean {
   if (e instanceof StaleError) return false;
-  if (e instanceof RetryableError || e instanceof BlockedError) return true;
+  if (e instanceof RetryableError || e instanceof BlockedError || e instanceof IndexLockedError) return true;
   if (e instanceof GitError) return TRANSIENT.test(`${e.message}\n${e.stderr}`);
   return TRANSIENT_FS.has((e as NodeJS.ErrnoException)?.code ?? '');
 }
@@ -158,7 +163,14 @@ export const undoApi: HandlerModule = (ctx) => {
         } catch (e) {
           if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
           const st = await fs.stat(lock).catch(() => null);
-          if (st && Date.now() - st.mtimeMs > LOCK_STALE_MS) await fs.rm(lock, { force: true });
+          if (st && Date.now() - st.mtimeMs > LOCK_STALE_MS) {
+            // Left by a crashed process. Only remove the lock we judged stale, not one someone took meanwhile.
+            const owner = await fs.readFile(lock, 'utf8').catch(() => null);
+            const again = await fs.stat(lock).catch(() => null);
+            if (owner !== null && again && again.mtimeMs === st.mtimeMs && (await fs.readFile(lock, 'utf8').catch(() => null)) === owner) {
+              await fs.rm(lock, { force: true });
+            }
+          }
           else if (Date.now() - started > LOCK_WAIT_MS) throw new RetryableError('The undo history is busy. Try again in a moment.');
           else await sleep(25);
         }
@@ -210,18 +222,6 @@ export const undoApi: HandlerModule = (ctx) => {
   // Not --short: that yields "heads/main" when a tag named "main" exists.
   const branch = (repo: string) =>
     git(repo, ['symbolic-ref', '-q', 'HEAD']).then((s) => s.trim().replace(/^refs\/heads\//, '') || null, () => null);
-  /** The index as a tree; null when it has conflicts. Waits briefly for another git process's index.lock. */
-  async function writeTree(repo: string): Promise<string | null> {
-    for (let attempt = 0; ; attempt++) {
-      try {
-        return (await git(repo, ['write-tree'])).trim() || null;
-      } catch (e) {
-        if (!/\.lock/.test(e instanceof GitError ? `${e.message}\n${e.stderr}` : String(e))) return null;
-        if (attempt >= 20) throw new RetryableError('Another git process is using the staging area. Try again in a moment.');
-        await sleep(50);
-      }
-    }
-  }
   const branchExists = (repo: string, name: string) =>
     git(repo, ['show-ref', '--verify', '-q', `refs/heads/${name}`]).then(() => true, () => false);
 
@@ -259,8 +259,16 @@ export const undoApi: HandlerModule = (ctx) => {
     const states: PathState[] = [];
     const files: { i: number; path: string }[] = [];
     for (const [i, p] of paths.entries()) {
-      const st = await fs.lstat(insideRepo(repo, p)).catch(() => null);
-      states.push(!st ? null : st.isFile() ? '' : '!');
+      let st: import('node:fs').Stats | null = null;
+      let state: PathState = null;
+      try {
+        st = await fs.lstat(insideRepo(repo, p));
+        state = st.isFile() ? '' : st.isSymbolicLink() ? 'link' : st.isDirectory() ? 'dir' : '!';
+      } catch (e) {
+        // A parent that is now a file (ENOTDIR) is not "absent": writing there would fail.
+        if ((e as NodeJS.ErrnoException).code !== 'ENOENT') state = '!';
+      }
+      states.push(state);
       if (st?.isFile()) files.push({ i, path: p });
     }
     if (files.length) (await hashFiles(repo, files.map((f) => f.path))).forEach((h, k) => (states[files[k].i] = h));
@@ -270,7 +278,13 @@ export const undoApi: HandlerModule = (ctx) => {
   async function guardFor(repo: string, spec: UndoSpec): Promise<Guard | undefined> {
     const guard: Guard = {};
     if (spec.kind === 'index' || spec.kind === 'files' || spec.kind === 'stash-apply' || ((spec.kind === 'head-reset' || spec.kind === 'ignore') && spec.index)) {
-      guard.index = await writeTree(repo);
+      try {
+        guard.index = await writeTree(repo);
+      } catch (e) {
+        // Without the staging area the undo of a stage or reset is meaningless; others can skip the index.
+        if (!(e instanceof IndexLockedError) || spec.kind === 'index' || spec.kind === 'head-reset') throw e;
+        guard.index = '?';
+      }
     }
     if (spec.kind === 'files' || spec.kind === 'stash-apply') {
       const paths = (spec.snapshot.files ?? []).map((f) => f.path);
@@ -281,36 +295,59 @@ export const undoApi: HandlerModule = (ctx) => {
   }
 
   /** Refuse to overwrite files changed since the operation (files already back in the old state are fine). */
-  async function checkFiles(repo: string, snapshot: Snapshot, guard: Guard | undefined) {
+  /** Returns links to remove before writing (the operation created them where files were). */
+  async function checkFiles(repo: string, snapshot: Snapshot, guard: Guard | undefined): Promise<string[]> {
     const files = snapshot.files ?? [];
-    if (!guard?.files) return;
+    if (!guard?.files) return [];
     const after = new Map(guard.files.map((f) => [f.path, f.state]));
     const states = await pathStates(repo, files.map((f) => f.path));
     // All paths are checked before anything is written.
+    const unlink: string[] = [];
     files.forEach((f, i) => {
-      if (states[i] === '!') {
-        throw new BlockedError(`"${f.path}" is now a folder or a link. Move it away to undo, or skip this undo.`);
+      const now = states[i];
+      const was = after.get(f.path);
+      if (now === f.blob) return; // already back
+      // The operation left a link (or a folder) here; the undo may replace a link, or write where it was removed.
+      if (was === 'link' && (now === 'link' || now === null)) {
+        if (now === 'link') unlink.push(f.path);
+        return;
       }
-      if (states[i] !== after.get(f.path) && states[i] !== f.blob) {
-        throw new BlockedError(`"${f.path}" was changed since then, and undoing would overwrite those changes. Discard or stash them to undo, or skip this undo.`);
+      if (was === 'dir' && now === null) return;
+      if (now === 'dir' || now === '!' || (now === 'link' && was !== 'link')) {
+        throw new BlockedError(`"${f.path}" is now ${now === 'dir' ? 'a folder' : now === 'link' ? 'a link' : 'in the way'}, so it can't be restored.`);
       }
+      if (now !== was) throw new BlockedError(`"${f.path}" was changed since then, and undoing would overwrite those changes.`);
     });
+    return unlink;
   }
 
   /** Put files back; the index too while HEAD and the staging area are as the operation left them. Returns a note when the index was left alone. */
   async function restoreSnapshot(repo: string, snapshot: Snapshot, guard: Guard | undefined): Promise<string | undefined> {
-    await checkFiles(repo, snapshot, guard);
+    const unlink = await checkFiles(repo, snapshot, guard);
     let index = !!snapshot.index;
     let note: string | undefined;
     if (index) {
       const tree = await writeTree(repo);
-      if (tree !== snapshot.index && ((await head(repo)) !== snapshot.head || (guard?.index !== undefined && tree !== guard.index))) {
+      const unknown = guard?.index === '?';
+      if (tree !== snapshot.index && (unknown || (await head(repo)) !== snapshot.head || (guard?.index !== undefined && tree !== guard.index))) {
         index = false;
         note = 'The staging area changed since then, so it was left as it is.';
       }
     }
+    for (const p of unlink) await fs.unlink(insideRepo(repo, p));
     await ctx.call('snapshot.restore', { repo, snapshot, index });
     return note;
+  }
+
+  /** The index must be as the operation left it before restoring an older one over it. */
+  async function checkIndex(repo: string, target: string, guard: Guard | undefined) {
+    const tree = await writeTree(repo);
+    if (tree === target) return;
+    if (tree === null) throw new BlockedError('There are unresolved conflicts. Finish or abort the merge first.');
+    if (guard?.index === undefined) return;
+    if (guard.index === '?' || tree !== guard.index) {
+      throw new BlockedError('Changes were staged or unstaged since then, and undoing would replace them.');
+    }
   }
 
   /** Branches git considers in use: checked out, or being rebased or bisected, in any worktree. */
@@ -327,17 +364,21 @@ export const undoApi: HandlerModule = (ctx) => {
         const name = (await fs.readFile(path.join(dir, f), 'utf8').catch(() => '')).trim();
         if (name.startsWith('refs/heads/')) used.add(name);
       }
+      // Branches a `rebase --update-refs` will move when it finishes.
+      const updateRefs = await fs.readFile(path.join(dir, 'rebase-merge', 'update-refs'), 'utf8').catch(() => '');
+      for (const line of updateRefs.split('\n')) if (line.startsWith('refs/heads/')) used.add(line.trim());
       const bisect = (await fs.readFile(path.join(dir, 'BISECT_START'), 'utf8').catch(() => '')).trim();
       if (bisect && !/^[0-9a-f]{40,64}$/.test(bisect)) used.add(`refs/heads/${bisect}`);
     }
     return used;
   }
 
-  async function refTransaction(repo: string, updates: { ref: string; old: string | null; new: string | null }[]) {
+  /** Returns 'already' when every ref was already at its target (a resumed undo, or the user did it). */
+  async function refTransaction(repo: string, updates: { ref: string; old: string | null; new: string | null }[]): Promise<'already' | void> {
     if (!updates.length) return;
     // Resuming after a partial run: nothing to do if every ref is already where the undo wants it.
     const now = await Promise.all(updates.map((u) => git(repo, ['rev-parse', '--verify', '-q', u.ref]).then((s) => s.trim() || null, () => null)));
-    if (updates.every((u, i) => now[i] === u.new)) return;
+    if (updates.every((u, i) => now[i] === u.new)) return 'already';
     const cmds: string[] = [];
     const inUse = updates.some((u) => u.new === null) ? await branchesInUse(repo) : new Set<string>();
     for (const u of updates) {
@@ -370,6 +411,12 @@ export const undoApi: HandlerModule = (ctx) => {
     }
   }
 
+  async function filterUnset(repo: string, entries: [string, string | null][]) {
+    const out: [string, string | null][] = [];
+    for (const e of entries) if ((await ctx.configGet(repo, e[0])) === undefined) out.push(e);
+    return out;
+  }
+
   async function deleteBranch(repo: string, name: string, hash: string) {
     assertSafe(name);
     await refTransaction(repo, [{ ref: `refs/heads/${name}`, old: hash, new: null }]);
@@ -385,10 +432,7 @@ export const undoApi: HandlerModule = (ctx) => {
         await expect(repo, resumed ? { branch: spec.branch } : { head: spec.from, branch: spec.branch });
         if (spec.index) {
           assertHash(spec.index);
-          const tree = await writeTree(repo);
-          if (tree !== spec.index && guard?.index !== undefined && tree !== guard.index) {
-            throw new StaleError('The staging area changed since then, so this can no longer be undone.');
-          }
+          await checkIndex(repo, spec.index, guard);
         }
         if (!resumed) await git(repo, ['reset', spec.mode === 'soft' ? '--soft' : '--keep', spec.to]);
         if (spec.index) await git(repo, ['read-tree', spec.index]);
@@ -415,18 +459,20 @@ export const undoApi: HandlerModule = (ctx) => {
       case 'index': {
         await expect(repo, { head: spec.head });
         assertHash(spec.tree);
-        const now = await writeTree(repo);
-        if (now === spec.tree) return {};
-        if (guard?.index !== undefined && now !== guard.index) throw new StaleError('The staging area changed since then, so this can no longer be undone.');
+        if ((await writeTree(repo)) === spec.tree) return {};
+        await checkIndex(repo, spec.tree, guard);
         await git(repo, ['read-tree', spec.tree]);
         return {};
       }
       case 'files':
         return { note: await restoreSnapshot(repo, spec.snapshot, guard) };
-      case 'refs':
-        await refTransaction(repo, spec.updates);
-        if (spec.config?.length) await setConfig(repo, spec.config);
+      case 'refs': {
+        const already = (await refTransaction(repo, spec.updates)) === 'already';
+        // When the refs were already in place, don't overwrite settings the user may have made since.
+        const config = already && spec.config ? await filterUnset(repo, spec.config) : spec.config;
+        if (config?.length) await setConfig(repo, config);
         return {};
+      }
       case 'checkout': {
         // Already back where we came from (an earlier attempt got halfway): only the branch deletion is left.
         const resumed = spec.from.branch ? (await branch(repo)) === spec.from.branch : !!spec.from.head && (await head(repo)) === spec.from.head && !(await branch(repo));
@@ -450,8 +496,14 @@ export const undoApi: HandlerModule = (ctx) => {
       case 'branch-rename': {
         assertSafe(spec.from);
         assertSafe(spec.to);
-        const current = await git(repo, ['rev-parse', '--verify', '-q', `refs/heads/${spec.to}`]).then((s) => s.trim(), () => '');
-        if (current !== spec.hash || (await branchExists(repo, spec.from))) throw new StaleError();
+        const at = (name: string) => git(repo, ['rev-parse', '--verify', '-q', `refs/heads/${name}`]).then((s) => s.trim(), () => '');
+        const [current, original] = [await at(spec.to), await at(spec.from)];
+        if (!current && original === spec.hash) {
+          // An earlier attempt renamed the branch but couldn't move its settings ("update of config-file failed").
+          await git(repo, ['config', '--rename-section', `branch.${spec.to}`, `branch.${spec.from}`], { okCodes: [1, 128] });
+          return {};
+        }
+        if (current !== spec.hash || original) throw new StaleError();
         await git(repo, ['branch', '-m', spec.to, spec.from]);
         return {};
       }
@@ -466,8 +518,14 @@ export const undoApi: HandlerModule = (ctx) => {
         assertHash(spec.hash);
         const top = await git(repo, ['rev-parse', '--verify', '-q', 'refs/stash']).then((s) => s.trim(), () => '');
         if (top !== spec.hash) throw new StaleError();
-        const r = await ctx.call<{ conflicts?: boolean }>('stash.apply', { repo, ref: 'stash@{0}', pop: true });
-        return { conflicts: !!r?.conflicts };
+        try {
+          const r = await ctx.call<{ conflicts?: boolean }>('stash.apply', { repo, ref: 'stash@{0}', pop: true });
+          return { conflicts: !!r?.conflicts };
+        } catch (e) {
+          // A failed pop may have applied part of the stash, so retrying could apply it twice. The stash
+          // itself stays in the list, so nothing is lost by not keeping this entry.
+          throw new StaleError(`Couldn't put the changes back: ${e instanceof Error ? e.message : String(e)} The stash is still in the list.`);
+        }
       }
       case 'stash-apply': {
         if (spec.restore) {
@@ -500,30 +558,40 @@ export const undoApi: HandlerModule = (ctx) => {
       }
       case 'remote-remove': {
         assertSafe(spec.name);
-        const exists = await git(repo, ['remote', 'get-url', spec.name]).then(() => true, () => false);
-        if (exists) throw new StaleError(`A remote named ${spec.name} exists again.`);
         const remoteKey = REMOTE_KEY(spec.name);
-        const bad = spec.config.find(([key]) => !remoteKey.test(key) && !LINK_KEY.test(key));
-        if (bad) throw new Error(`Config key not allowed: ${bad[0]}`);
+        const url = spec.config.find(([k]) => k.toLowerCase() === `remote.${spec.name}.url`.toLowerCase())?.[1];
+        const existing = await configEntries(repo, `^remote\\.${escapeRegExp(spec.name)}\\.`);
+        if (existing.length) {
+          // Resuming is fine when it's this remote coming back (same URL); anything else is someone else's remote.
+          const existingUrl = existing.find(([k]) => k.toLowerCase() === `remote.${spec.name}.url`.toLowerCase())?.[1];
+          if (!url || existingUrl !== url) throw new StaleError(`A remote named ${spec.name} exists again.`);
+        }
+        const have = new Set(existing.map(([k, v]) => `${k.toLowerCase()}\0${v}`));
+        const skipped: string[] = [];
         for (const [key, value] of spec.config) {
           if (remoteKey.test(key)) {
-            await git(repo, ['config', '--add', key, value]);
-          } else {
+            if (!have.has(`${key.toLowerCase()}\0${value}`)) await git(repo, ['config', '--add', key, value]);
+          } else if (LINK_KEY.test(key)) {
             // Re-link branches (and pushDefault) to this remote, unless they point somewhere else by now.
-            const current = await ctx.configGet(repo, key);
-            if (current === undefined) await git(repo, ['config', key, value]);
+            if ((await ctx.configGet(repo, key)) === undefined) await git(repo, ['config', key, value]);
+          } else {
+            skipped.push(key);
           }
         }
         // Remote-tracking branches come back too when their commits are still around (a fetch restores the rest).
         const prefix = `refs/remotes/${spec.name}/`;
-        const refs = (spec.refs ?? []).filter(([ref, oid]) => ref.startsWith(prefix) && !ref.includes('..') && /^[0-9a-f]{40,64}$/.test(oid));
-        if (refs.length) {
-          const present = await git(repo, ['cat-file', '--batch-check'], { input: refs.map(([, oid]) => oid).join('\n') + '\n' });
-          const lines = present.split('\n');
-          const cmds = refs.flatMap(([ref, oid], i) => (/ missing$/.test(lines[i] ?? '') ? [] : [`create ${ref}`, oid]));
+        const refs = (spec.refs ?? []).filter(([ref]) => ref.startsWith(prefix) && !ref.includes('..'));
+        const plain = refs.filter(([, oid]) => /^[0-9a-f]{40,64}$/.test(oid));
+        if (plain.length) {
+          const present = (await git(repo, ['cat-file', '--batch-check'], { input: plain.map(([, oid]) => oid).join('\n') + '\n' })).split('\n');
+          const cmds = plain.flatMap(([ref, oid], i) => (/ missing$/.test(present[i] ?? '') ? [] : [`create ${ref}`, oid]));
           if (cmds.length) await git(repo, ['update-ref', '--stdin', '-z'], { input: cmds.join('\0') + '\0' }).catch(() => undefined);
         }
-        return {};
+        for (const [ref, target] of refs) {
+          const to = target.startsWith('ref:') ? target.slice(4) : '';
+          if (to.startsWith(prefix) && !to.includes('..')) await git(repo, ['symbolic-ref', ref, to]).catch(() => undefined);
+        }
+        return skipped.length ? { note: `Not restored (not allowed): ${skipped.join(', ')}` } : {};
       }
       case 'ignore': {
         await expect(repo, { head: spec.head });
@@ -535,10 +603,7 @@ export const undoApi: HandlerModule = (ctx) => {
         }
         if (spec.index) {
           assertHash(spec.index);
-          const tree = await writeTree(repo);
-          if (tree !== spec.index && guard?.index !== undefined && tree !== guard.index) {
-            throw new StaleError('The staging area changed since then, so this can no longer be undone.');
-          }
+          await checkIndex(repo, spec.index, guard);
         }
         if (current !== spec.before) {
           if (spec.before === null) await fs.rm(file, { force: true });
@@ -613,7 +678,13 @@ export const undoApi: HandlerModule = (ctx) => {
           const result = await execute(repo, entry.spec, entry.guard);
           return { label: entry.label, ...result, state: state(entries) };
         } catch (e) {
-          if (isRetryable(e)) await write(file, [...entries, entry]).catch(() => undefined);
+          if (isRetryable(e)) {
+            try {
+              await write(file, [...entries, entry]);
+            } catch (w) {
+              if (e instanceof Error) e.message += ` (It couldn't be kept for another try: ${(w as Error).message})`;
+            }
+          }
           throw e;
         }
       });
@@ -642,7 +713,9 @@ export const undoApi: HandlerModule = (ctx) => {
     async 'config.remoteEntries'({ repo, name }: { repo: string; name: string }): Promise<[string, string][]> {
       assertSafe(name);
       const remoteKey = REMOTE_KEY(name);
-      const own = (await configEntries(repo, `^remote\\.${escapeRegExp(name)}\\.`)).filter(([k]) => remoteKey.test(k));
+      // Everything, even keys that won't be written back, so the undo can say what it left out.
+      void remoteKey;
+      const own = await configEntries(repo, `^remote\\.${escapeRegExp(name)}\\.`);
       const pointing = (await configEntries(repo, '^(branch\\..*\\.(remote|pushremote)|remote\\.pushdefault)$')).filter(([, v]) => v === name);
       const linked: [string, string][] = [];
       for (const [key, value] of pointing) {
@@ -659,15 +732,17 @@ export const undoApi: HandlerModule = (ctx) => {
     /** Remote-tracking refs of a remote, for restoring them when its removal is undone. */
     async 'refs.remoteTracking'({ repo, name }: { repo: string; name: string }): Promise<[string, string][]> {
       assertSafe(name);
-      const out = await git(repo, ['for-each-ref', '--format=%(refname)%00%(objectname)', `refs/remotes/${name}/`]);
+      const out = await git(repo, ['for-each-ref', '--format=%(refname)%00%(objectname)%00%(symref)', `refs/remotes/${name}/`]);
+      // Leave out the refs of nested remotes ("origin/fork" next to "origin").
+      const nested = (await git(repo, ['remote']).catch(() => '')).split('\n').filter((r) => r.startsWith(`${name}/`));
       return out
         .split('\n')
         .filter(Boolean)
         .map((l): [string, string] => {
-          const [ref, oid] = l.split('\0');
-          return [ref, oid];
+          const [ref, oid, symref] = l.split('\0');
+          return [ref, symref ? `ref:${symref}` : oid];
         })
-        .filter(([ref]) => !ref.endsWith('/HEAD'));
+        .filter(([ref]) => !nested.some((n) => ref.startsWith(`refs/remotes/${n}/`)));
     },
   };
 };

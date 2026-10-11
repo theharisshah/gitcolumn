@@ -120,14 +120,43 @@ function cleanError(text: string): string {
     .trim();
 }
 
+/** Another git process holds the index lock. */
+export class IndexLockedError extends Error {}
+
+/** git's message when a lock file is held by another process (as opposed to e.g. an unmerged "yarn.lock"). */
+export const LOCK_HELD = /Unable to create '[^']*\.lock': File exists/i;
+
+/**
+ * `git write-tree`: the index as a tree object, or null when it has unmerged entries.
+ * Waits briefly when another git process holds index.lock, then throws IndexLockedError.
+ */
+export async function writeTree(cwd: string, waitMs = 1500): Promise<string | null> {
+  const started = Date.now();
+  for (;;) {
+    try {
+      return (await git(cwd, ['write-tree'])).trim() || null;
+    } catch (e) {
+      if (!(e instanceof GitError) || !LOCK_HELD.test(`${e.message}\n${e.stderr}`)) return null;
+      if (Date.now() - started > waitMs) throw new IndexLockedError('Another git process is using the staging area. Try again in a moment.');
+      await new Promise((r) => setTimeout(r, 50));
+    }
+  }
+}
+
 /**
  * Blob ids of working tree files, hashed without filters (as stored by snapshots).
- * Paths go as arguments: --stdin-paths would C-unquote a path that starts with a double quote.
+ * Paths go as arguments (--stdin-paths would C-unquote a path that starts with a double quote),
+ * in batches that stay well below command-line length limits (32K characters on Windows).
  */
 export async function hashFiles(cwd: string, paths: string[], write = false): Promise<string[]> {
   const ids: string[] = [];
-  for (let i = 0; i < paths.length; i += 200) {
-    const chunk = paths.slice(i, i + 200);
+  for (let i = 0; i < paths.length; ) {
+    const chunk: string[] = [];
+    let length = 0;
+    while (i < paths.length && (chunk.length === 0 || (length + paths[i].length < 8000 && chunk.length < 200))) {
+      length += paths[i].length + 3;
+      chunk.push(paths[i++]);
+    }
     const out = await git(cwd, ['hash-object', ...(write ? ['-w'] : []), '--no-filters', '--', ...chunk]);
     ids.push(...out.trim().split('\n'));
   }
