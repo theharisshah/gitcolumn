@@ -7,6 +7,7 @@ import './styles/reflog.css';
 import './styles/workingcopy.css';
 import './styles/palette.css';
 import './styles/branches.css';
+import './styles/pulls.css';
 
 if (window.gitcolumn) document.documentElement.classList.add('electron', `platform-${window.gitcolumn.platform}`);
 

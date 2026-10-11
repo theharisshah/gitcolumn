@@ -56,6 +56,7 @@ import { undoApi } from './undo.ts';
 import { ignoreApi } from './ignore.ts';
 import { annotateRefs, branchesApi } from './branches.ts';
 import { checkMerges, rebaseWithMerges } from './rebase.ts';
+import { githubApi } from './github.ts';
 import type { ApiCtx, HandlerModule } from './ctx.ts';
 import {
   assertHash,
@@ -88,7 +89,7 @@ export interface Host {
 export type Handler = (args: any) => Promise<unknown>;
 
 /** Feature modules (files, reflog, undo, branches, rebase, github) contributing handlers. */
-const HANDLER_MODULES: HandlerModule[] = [filesApi, reflogApi, undoApi, ignoreApi, branchesApi];
+const HANDLER_MODULES: HandlerModule[] = [filesApi, reflogApi, undoApi, ignoreApi, branchesApi, githubApi];
 
 export interface ConflictResult {
   conflicts: boolean;

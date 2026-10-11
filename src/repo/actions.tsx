@@ -1154,6 +1154,78 @@ export function useActions() {
         return run('Removing worktree…', () => api.worktreeRemove(path, wt.path, !!v.force), { success: 'Worktree removed' });
       },
 
+      // -------------------------------------------------------- pull requests
+      /** Open a pull request for a branch (publishing it first if needed), prefilled from its commits and the repo's template. */
+      async createPullRequest(branchName?: string) {
+        const branch = branchName ?? status?.branch;
+        if (!branch) return ui.toast('warning', 'Check out a branch first');
+        const gh = await api.ghStatus(path).catch(() => null);
+        if (!gh || gh.state !== 'ready') {
+          setView({ kind: 'pulls' });
+          return ui.toast('info', 'GitHub isn’t set up for this repository yet', gh && gh.state !== 'not-installed' ? (gh as { message?: string }).message : undefined);
+        }
+        let ref = refs.find((r) => r.type === 'head' && r.name === branch);
+        if (!ref?.upstream || ref.upstreamGone || (ref.ahead ?? 0) > 0) {
+          const publish = await ui.confirm({
+            title: ref?.upstream && !ref.upstreamGone ? `Push "${branch}" first?` : `Publish "${branch}" first?`,
+            message: ref?.upstream && !ref.upstreamGone ? `${plural(ref.ahead ?? 0, 'commit')} haven't been pushed yet.` : 'The branch has to be on GitHub before a pull request can be opened.',
+            confirmLabel: ref?.upstream && !ref.upstreamGone ? 'Push' : 'Publish',
+          });
+          if (!publish) return;
+          const pushed = await actions.push(branch);
+          if (!pushed) return;
+          ref = (await api.refs(path)).find((r) => r.type === 'head' && r.name === branch);
+        }
+        const base = gh.repo.defaultBranch;
+        const commits = await api.logRange(path, `refs/remotes/${gh.repo.remote}/${base}`, branch).catch(() => []);
+        let template = '';
+        for (const p of ['.github/pull_request_template.md', '.github/PULL_REQUEST_TEMPLATE.md', 'docs/pull_request_template.md', 'pull_request_template.md']) {
+          const c = await api.fileContent(path, branch, p).catch(() => null);
+          if (c?.kind === 'text') {
+            template = c.content;
+            break;
+          }
+        }
+        const title = commits.length === 1 ? commits[0].subject : branch.replace(/^[\w-]+\//, '').replace(/[-_]+/g, ' ').replace(/^./, (ch) => ch.toUpperCase());
+        const body = template || (commits.length > 1 ? commits.map((c) => `- ${c.subject}`).reverse().join('\n') : '');
+        const remoteBranches = refs.filter((r) => r.type === 'remote' && r.remote === gh.repo.remote).map((r) => r.name.slice(gh.repo.remote.length + 1));
+        const v = await ui.form({
+          title: 'Create Pull Request',
+          message: (
+            <>
+              <span className="mono">{branch}</span> → <b>{gh.repo.nameWithOwner}</b>
+            </>
+          ),
+          fields: [
+            { name: 'title', label: 'Title', value: title, required: true },
+            { name: 'body', label: 'Description', type: 'textarea', value: body },
+            { name: 'base', label: 'Base branch', value: base, mono: true, required: true, suggestions: remoteBranches.filter((b) => b !== branch && b !== 'HEAD') },
+            { name: 'draft', type: 'checkbox', label: 'Create as draft' },
+          ],
+          confirmLabel: 'Create Pull Request',
+        });
+        if (!v) return;
+        const created = await run('Creating pull request…', () => api.prCreate(path, { title: String(v.title), body: String(v.body ?? ''), base: String(v.base).trim(), head: branch, draft: !!v.draft }), {
+          noRefresh: true,
+        });
+        if (!created) return;
+        if (created.number) setView({ kind: 'pulls', state: 'open', number: created.number });
+        ui.toast('success', `Created pull request${created.number ? ` #${created.number}` : ''}`, created.url, { label: 'Open', onClick: () => window.open(created.url, '_blank') });
+      },
+
+      /** gh pr checkout, undoable like any checkout (the branch it created is deleted again). */
+      async checkoutPullRequest(pr: { number: number; headRefName: string }) {
+        const existed = new Set(refs.filter((r) => r.type === 'head').map((r) => r.name));
+        return run(`Checking out #${pr.number}…`, () => api.prCheckout(path, pr.number), {
+          success: `Checked out #${pr.number}`,
+          snapshot: true,
+          undo: async (_r, before) => {
+            const now = await currentPos();
+            return undoCheckout(before, now.branch && !existed.has(now.branch) ? now.branch : undefined)();
+          },
+        });
+      },
+
       pruneWorktrees: () => run('Pruning worktrees…', () => api.worktreePrune(path), { success: 'Pruned missing worktrees' }),
 
       showFileHistory: (filePath: string, rev?: string | null) => setView({ kind: 'file', path: filePath, mode: 'history', rev }),

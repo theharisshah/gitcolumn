@@ -1,0 +1,41 @@
+[
+  {
+    "number": 12,
+    "title": "Add search",
+    "state": "OPEN",
+    "author": { "login": "alice", "name": "Alice Example", "is_bot": false },
+    "headRefName": "feature/search",
+    "baseRefName": "main",
+    "isDraft": false,
+    "reviewDecision": "APPROVED",
+    "statusCheckRollup": [
+      { "__typename": "CheckRun", "name": "test", "status": "COMPLETED", "conclusion": "SUCCESS", "detailsUrl": "https://github.com/o/r/actions/runs/1", "workflowName": "CI" },
+      { "__typename": "CheckRun", "name": "lint", "status": "IN_PROGRESS", "conclusion": "", "detailsUrl": "https://github.com/o/r/actions/runs/2", "workflowName": "CI" },
+      { "__typename": "StatusContext", "context": "ci/legacy", "state": "SUCCESS", "targetUrl": "https://ci.example.com/3" }
+    ],
+    "createdAt": "2026-10-01T10:00:00Z",
+    "updatedAt": "2026-10-02T10:00:00Z",
+    "url": "https://github.com/o/r/pull/12",
+    "labels": [{ "name": "feature", "color": "0e8a16" }],
+    "isCrossRepository": false
+  },
+  {
+    "number": 11,
+    "title": "Bump dependency",
+    "state": "OPEN",
+    "author": { "login": "app/dependabot", "is_bot": true },
+    "headRefName": "dependabot/npm/x",
+    "baseRefName": "main",
+    "isDraft": true,
+    "reviewDecision": "",
+    "statusCheckRollup": [
+      { "__typename": "CheckRun", "name": "test", "status": "COMPLETED", "conclusion": "FAILURE", "detailsUrl": "https://github.com/o/r/actions/runs/4", "workflowName": "CI" },
+      { "__typename": "StatusContext", "context": "ci/legacy", "state": "ERROR", "targetUrl": "" }
+    ],
+    "createdAt": "2026-09-01T10:00:00Z",
+    "updatedAt": "2026-09-02T10:00:00Z",
+    "url": "https://github.com/o/r/pull/11",
+    "labels": [],
+    "isCrossRepository": false
+  }
+]

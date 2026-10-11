@@ -4,6 +4,7 @@ import { api, type ConflictResult } from '../lib/api';
 import { draftFromMessage, loadDraft, saveDraft } from '../lib/draft';
 import { modKey } from '../lib/format';
 import { getSetting, onSettingsChange } from '../lib/settings';
+import { setAvatarMap } from '../lib/avatars';
 import { useUI } from '../ui/UIProvider';
 import { navBack, navForward, navInit, navPush, navReplace, type NavState, type View } from './navigation';
 
@@ -191,6 +192,15 @@ export function RepoProvider({ repo, active = true, children }: { repo: RepoInfo
   }, [active, autoFetch, hasRemotes, repo.path, load]);
 
   const loadUndo = useCallback(() => api.undoState(repo.path).then(setUndoState, () => undefined), [repo.path]);
+  // GitHub avatars for the repository's authors (through gh), when enabled and available.
+  useEffect(() => {
+    if (!active || !getSetting('githubAvatars')) return;
+    let cancelled = false;
+    api.ghAvatars(repo.path).then((m) => !cancelled && setAvatarMap(m), () => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [repo.path, active]);
   // Another tab or window may have changed the journal; refresh when this tab comes forward.
   useEffect(() => {
     if (active) void loadUndo();

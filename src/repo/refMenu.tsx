@@ -49,6 +49,7 @@ export function useRefMenu() {
       if (remotes.length) items.push({ label: 'Push To…', onClick: () => actions.pushTo(r) });
       if (r.upstream) items.push({ label: `Force Push "${r.name}"…`, onClick: () => actions.push(r.name, { force: true }) });
       items.push({ label: 'Track Remote Branch…', onClick: () => actions.setUpstream(r) });
+      if (remotes.length) items.push({ label: 'Create Pull Request…', onClick: () => actions.createPullRequest(r.name) });
       items.push('separator', { header: 'Stack' });
       items.push({ label: 'Create Stacked Branch…', onClick: () => actions.createStackedBranch(r.name) });
       items.push({ label: r.parent ? `Parent: ${r.parent}…` : 'Track Parent Branch…', onClick: () => actions.trackParent(r) });

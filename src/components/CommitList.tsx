@@ -446,7 +446,11 @@ function GraphCell({ row, geometry, isHead }: { row?: GraphRow; geometry: GraphG
       {isHead && <circle className={`node-ring ${laneCls}`} cx={cx} cy={cy} r={6.5} />}
       {left || right ? (
         <circle className={`node-ring node-overflow ${laneCls}`} cx={cx} cy={cy} r={3.5}>
-          <title>On lane {row.col + 1} — scroll the graph sideways to see it</title>
+          <title>
+            {row.col >= GRAPH_LAYOUT_LANES
+              ? `On lane ${row.col + 1}, beyond the ${GRAPH_LAYOUT_LANES} lanes the graph shows`
+              : `On lane ${row.col + 1} — scroll the graph sideways to see it`}
+          </title>
         </circle>
       ) : (
         <circle className={`node ${laneCls} ${row.isMerge ? 'node-merge' : ''}`} cx={cx} cy={cy} r={row.isMerge ? 3.5 : 4} />

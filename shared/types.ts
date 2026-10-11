@@ -426,3 +426,94 @@ export interface UndoResult {
   /** For undone commits: the message to put back into the composer */
   restoreMessage?: string;
 }
+
+// ------------------------------------------------------------------ GitHub (gh)
+
+export type GhMergeMethod = 'merge' | 'squash' | 'rebase';
+
+export interface GhRepo {
+  /** owner/name of the repository pull requests go to (the parent of a fork) */
+  nameWithOwner: string;
+  url: string;
+  defaultBranch: string;
+  isFork: boolean;
+  /** For a fork: the repository it was forked from */
+  parent?: string;
+  mergeMethods: GhMergeMethod[];
+  /** The signed-in account may merge pull requests there (write access) */
+  canMerge: boolean;
+  /** The local remote that points at it */
+  remote: string;
+}
+
+export type GhStatus =
+  | { state: 'ready'; host: string; repo: GhRepo; user: string | null }
+  | { state: 'not-installed' }
+  | { state: 'not-authenticated'; host: string; message: string }
+  | { state: 'not-github'; message: string }
+  | { state: 'error'; message: string };
+
+export interface GhChecks {
+  state: 'success' | 'failure' | 'pending' | 'none';
+  total: number;
+  passed: number;
+  failed: number;
+  pending: number;
+}
+
+export interface GhCheck {
+  name: string;
+  state: 'success' | 'failure' | 'pending' | 'neutral' | 'skipped';
+  url?: string;
+  workflow?: string;
+}
+
+export interface GhUser {
+  login: string;
+  name?: string;
+  bot?: boolean;
+}
+
+export interface GhPullSummary {
+  number: number;
+  title: string;
+  state: 'open' | 'closed' | 'merged';
+  author: GhUser;
+  headRefName: string;
+  baseRefName: string;
+  isDraft: boolean;
+  /** APPROVED, CHANGES_REQUESTED, REVIEW_REQUIRED or null */
+  reviewDecision: string | null;
+  checks: GhChecks;
+  createdAt: string;
+  updatedAt: string;
+  url: string;
+  labels: { name: string; color: string }[];
+  isCrossRepository: boolean;
+}
+
+export interface GhConversationItem {
+  kind: 'comment' | 'review';
+  author: string;
+  body: string;
+  createdAt: string;
+  /** Reviews: APPROVED, CHANGES_REQUESTED, COMMENTED… */
+  reviewState?: string;
+}
+
+export interface GhPullDetail extends GhPullSummary {
+  body: string;
+  headRefOid: string;
+  baseRefOid: string;
+  mergeable: string;
+  mergeStateStatus: string;
+  additions: number;
+  deletions: number;
+  changedFiles: number;
+  mergedAt: string | null;
+  closedAt: string | null;
+  conversation: GhConversationItem[];
+  checkRuns: GhCheck[];
+  commits: { oid: string; headline: string; date: string; authors: string[] }[];
+  files: { path: string; additions: number; deletions: number }[];
+}

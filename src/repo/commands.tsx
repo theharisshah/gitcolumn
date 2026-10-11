@@ -71,6 +71,7 @@ export function useCommands(extra: { openPalette?: () => void } = {}): Command[]
       { id: 'tag.new', title: 'New Tag…', group: 'Branch', enabled: !!status?.head, run: () => void actions.createTag() },
       { id: 'stash.save', title: 'Stash Changes…', group: 'Stash', shortcut: 'mod+shift+s', menu: true, enabled: !!status?.files.length, run: () => void actions.stashSave() },
       { id: 'stash.pop', title: 'Pop Latest Stash', group: 'Stash', enabled: stashes.length > 0, run: () => stashes[0] && void actions.stashApply(stashes[0], true) },
+      { id: 'pr.create', title: 'Create Pull Request…', group: 'GitHub', menu: true, keywords: ['github', 'pr', 'review'], enabled: !!status?.branch, run: () => void actions.createPullRequest() },
       { id: 'edit.undo', title: undoLabel ? `Undo ${undoLabel}` : 'Undo', group: 'Edit', shortcut: 'mod+z', menu: true, run: () => void undo() },
       { id: 'edit.clearUndo', title: 'Clear Undo History', group: 'Edit', keywords: ['reset', 'forget'], enabled: canUndo, run: () => void clearUndo() },
     ];
