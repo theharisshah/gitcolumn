@@ -1,39 +1,17 @@
 import { GitBranch, Search, X } from 'lucide-react';
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { Commit } from '../../shared/types';
 import { api, type SearchMode } from '../lib/api';
-import { copyText, relativeTime, shortHash } from '../lib/format';
-import { GraphLayout, LANE_COLORS, type GraphRow } from '../lib/graph';
+import { copyText, shortHash } from '../lib/format';
+import { GRAPH_LAYOUT_LANES, GraphLayout, type GraphRow } from '../lib/graph';
 import { useActions } from '../repo/actions';
 import { useRepo } from '../repo/RepoContext';
 import { useUI, type MenuItem } from '../ui/UIProvider';
 import { CommitDetails } from './CommitDetails';
-import { RefBadges, refsByHash, type BadgeRef } from './RefBadges';
+import { CommitList } from './CommitList';
+import { refsByHash, type BadgeRef } from './RefBadges';
 import { Splitter, usePersistentSize } from './Splitter';
 
-const ROW_H = 28;
-/** Lanes beyond this are clipped; a commit whose lane is further right is pinned to the edge. */
-const MAX_VISIBLE_LANES = 16;
-
-interface GraphGeometry {
-  laneW: number;
-  /** x of lane 0 */
-  x0: number;
-  visible: number;
-  width: number;
-}
-
-function graphGeometry(maxLanes: number, listWidth: number): GraphGeometry {
-  // Roomy lanes for simple histories, tighter ones once there are many parallel lines.
-  const laneW = maxLanes <= 6 ? 14 : 11;
-  const x0 = laneW / 2 + 2;
-  // The graph may use up to about a quarter of the list so the subject always has room.
-  const fit = Math.max(4, Math.floor((listWidth * 0.25 - 12) / laneW));
-  const visible = Math.max(1, Math.min(maxLanes, MAX_VISIBLE_LANES, fit));
-  // When lanes are hidden, leave room after the last one for the pinned node and its HEAD ring.
-  const tail = maxLanes > visible ? 10 : 2;
-  return { laneW, x0, visible, width: Math.ceil(x0 + (visible - 1) * laneW + laneW / 2 + tail) };
-}
 const PAGE = 500;
 const NO_GRAPH = { rows: [] as GraphRow[], maxWidth: 0 };
 
@@ -102,7 +80,7 @@ export function History({
           layoutRef.current = null;
           setGraph(NO_GRAPH);
         } else {
-          const layout = new GraphLayout({ maxLanes: MAX_VISIBLE_LANES });
+          const layout = new GraphLayout({ maxLanes: GRAPH_LAYOUT_LANES });
           layoutRef.current = layout;
           setGraph({ rows: layout.append(list), maxWidth: layout.maxWidth });
         }
@@ -280,190 +258,5 @@ export function History({
         )}
       </div>
     </div>
-  );
-}
-
-interface CommitListProps {
-  commits: Commit[];
-  graph: GraphRow[];
-  maxLanes: number;
-  badges: Map<string, BadgeRef[]>;
-  head: string | null;
-  selected: string | null;
-  onSelect: (hash: string) => void;
-  onContextMenu: (e: React.MouseEvent, c: Commit) => void;
-  onBadgeMenu: (e: React.MouseEvent, b: BadgeRef) => void;
-  onEndReached: () => void;
-}
-
-function CommitList({ commits, graph, maxLanes, badges, head, selected, onSelect, onContextMenu, onBadgeMenu, onEndReached }: CommitListProps) {
-  const scrollRef = useRef<HTMLDivElement>(null);
-  const [scrollTop, setScrollTop] = useState(0);
-  const [height, setHeight] = useState(600);
-  const [listWidth, setListWidth] = useState(800);
-  // Round so the geometry (and the memoized rows) only change when a lane's worth of space does.
-  const roundedWidth = Math.round(listWidth / 40) * 40;
-  const geometry = useMemo(() => (maxLanes ? graphGeometry(maxLanes, roundedWidth) : null), [maxLanes, roundedWidth]);
-  const graphWidth = geometry?.width ?? 10;
-
-  useLayoutEffect(() => {
-    const el = scrollRef.current;
-    if (!el) return;
-    const measure = () => {
-      setHeight(el.clientHeight);
-      setListWidth(el.clientWidth);
-    };
-    const ro = new ResizeObserver(measure);
-    ro.observe(el);
-    measure();
-    return () => ro.disconnect();
-  }, []);
-
-  const start = Math.max(0, Math.floor(scrollTop / ROW_H) - 8);
-  const end = Math.min(commits.length, Math.ceil((scrollTop + height) / ROW_H) + 8);
-
-  useEffect(() => {
-    if (end >= commits.length - 50) onEndReached();
-  }, [end, commits.length, onEndReached]);
-
-  const selIndex = commits.findIndex((c) => c.hash === selected);
-
-  // Keep the selected commit visible when it is chosen from elsewhere (blame, parent links…).
-  useEffect(() => {
-    const el = scrollRef.current;
-    if (!el || selIndex < 0) return;
-    const top = selIndex * ROW_H;
-    if (top < el.scrollTop || top + ROW_H > el.scrollTop + el.clientHeight) el.scrollTop = Math.max(0, top - el.clientHeight / 3);
-    // Also re-run once the selected commit's row is known (after loading) or moves (after a reload).
-  }, [selected, selIndex]);
-
-  const onKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
-    e.preventDefault();
-    const next = Math.max(0, Math.min(commits.length - 1, selIndex + (e.key === 'ArrowDown' ? 1 : -1)));
-    onSelect(commits[next].hash);
-    const el = scrollRef.current;
-    if (el) {
-      const top = next * ROW_H;
-      if (top < el.scrollTop) el.scrollTop = top;
-      else if (top + ROW_H > el.scrollTop + el.clientHeight) el.scrollTop = top + ROW_H - el.clientHeight;
-    }
-  };
-
-  const rows = [];
-  for (let i = start; i < end; i++) {
-    const c = commits[i];
-    rows.push(
-      <CommitRow
-        key={c.hash}
-        commit={c}
-        top={i * ROW_H}
-        row={graph[i]}
-        geometry={geometry}
-        badges={badges.get(c.hash)}
-        isHead={c.hash === head}
-        selected={c.hash === selected}
-        onSelect={onSelect}
-        onContextMenu={onContextMenu}
-        onBadgeMenu={onBadgeMenu}
-      />,
-    );
-  }
-
-  return (
-    <div className="commit-list">
-      <div className="commit-list-head">
-        <span className="col-subject" style={{ paddingLeft: graphWidth }}>
-          Subject
-        </span>
-        <span className="col-author">Author</span>
-        <span className="col-date">Date</span>
-        <span className="col-sha">SHA</span>
-      </div>
-      <div className="commit-scroll" ref={scrollRef} tabIndex={0} onScroll={(e) => setScrollTop(e.currentTarget.scrollTop)} onKeyDown={onKeyDown}>
-        <div style={{ height: commits.length * ROW_H, position: 'relative' }}>{rows}</div>
-      </div>
-    </div>
-  );
-}
-
-const CommitRow = memo(function CommitRow({
-  commit: c,
-  top,
-  row,
-  geometry,
-  badges,
-  isHead,
-  selected,
-  onSelect,
-  onContextMenu,
-  onBadgeMenu,
-}: {
-  commit: Commit;
-  top: number;
-  row: GraphRow;
-  geometry: GraphGeometry | null;
-  badges?: BadgeRef[];
-  isHead: boolean;
-  selected: boolean;
-  onSelect: (hash: string) => void;
-  onContextMenu: (e: React.MouseEvent, c: Commit) => void;
-  onBadgeMenu: (e: React.MouseEvent, b: BadgeRef) => void;
-}) {
-  return (
-    <div
-      className={`commit-row ${selected ? 'selected' : ''} ${isHead ? 'is-head' : ''}`}
-      style={{ top, height: ROW_H }}
-      onMouseDown={(e) => e.button === 0 && onSelect(c.hash)}
-      onContextMenu={(e) => onContextMenu(e, c)}
-    >
-      <span className="col-subject">
-        {geometry ? <GraphCell row={row} geometry={geometry} isHead={isHead} /> : <span className="graph-none" />}
-        <RefBadges badges={badges} onContextMenu={onBadgeMenu} />
-        <span className={`commit-subject ${c.parents.length > 1 ? 'merge' : ''}`}>{c.subject}</span>
-      </span>
-      <span className="col-author" title={c.email}>
-        {c.author}
-      </span>
-      <span className="col-date" title={new Date(c.date * 1000).toLocaleString()}>
-        {relativeTime(c.date)}
-      </span>
-      <span className="col-sha mono">{shortHash(c.hash)}</span>
-    </div>
-  );
-});
-
-function GraphCell({ row, geometry, isHead }: { row?: GraphRow; geometry: GraphGeometry; isHead: boolean }) {
-  const { laneW, x0, visible, width } = geometry;
-  if (!row) return <span style={{ width, flex: 'none' }} />;
-  const x = (lane: number) => x0 + lane * laneW;
-  const y = (v: number) => v * ROW_H;
-  // Lanes past the visible area aren't drawn; a commit on one is pinned to the edge, hollow.
-  const overflow = row.col >= visible;
-  const cx = overflow ? width - 7.5 : x(row.col);
-  const cy = ROW_H / 2;
-  const laneCls = `lane-${row.color % LANE_COLORS}`;
-  return (
-    <svg className="graph" width={width} height={ROW_H} viewBox={`0 0 ${width} ${ROW_H}`}>
-      {row.segments.map((s, i) => {
-        if (Math.min(s.x1, s.x2) >= visible) return null;
-        const cls = `lane lane-${s.color % LANE_COLORS}`;
-        if (s.x1 === s.x2) return <line key={i} className={cls} x1={x(s.x1)} y1={y(s.y1)} x2={x(s.x2)} y2={y(s.y2)} />;
-        const x1 = x(s.x1);
-        const y1 = y(s.y1);
-        const x2 = x(s.x2);
-        const y2 = y(s.y2);
-        const my = (y1 + y2) / 2;
-        return <path key={i} className={cls} d={`M${x1},${y1} C${x1},${my} ${x2},${my} ${x2},${y2}`} />;
-      })}
-      {isHead && <circle className={`node-ring ${laneCls}`} cx={cx} cy={cy} r={6.5} />}
-      {overflow ? (
-        <circle className={`node-ring node-overflow ${laneCls}`} cx={cx} cy={cy} r={3.5}>
-          <title>On lane {row.col + 1} — too many parallel lines to show</title>
-        </circle>
-      ) : (
-        <circle className={`node ${laneCls} ${row.isMerge ? 'node-merge' : ''}`} cx={cx} cy={cy} r={row.isMerge ? 3.5 : 4} />
-      )}
-    </svg>
   );
 }

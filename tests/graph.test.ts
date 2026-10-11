@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
-import { GraphLayout, layoutGraph, type GraphRow } from '../src/lib/graph.ts';
+import { GraphLayout, layoutGraph, type GraphRow, type Segment } from '../src/lib/graph.ts';
 import type { Commit } from '../shared/types.ts';
 
 // ------------------------------------------------------------- generators
@@ -72,6 +72,21 @@ function randomHistory(seed: number, size: number): Commit[] {
 
 // ------------------------------------------------------------- invariants
 
+/** Follow the line leaving row `r` by `start` down to the commit whose node it reaches (null: off the page). */
+function followEdge(commits: Commit[], rows: GraphRow[], r: number, start: Segment): string | null {
+  let x = start.x2;
+  for (let at = r + 1; at < rows.length; at++) {
+    const enter = rows[at].segments.find((s) => s.y1 === 0 && s.x1 === x)!;
+    assert.ok(enter, `row ${at}: lane at x=${x} continues`);
+    // Pass-through lanes never occupy the node's column, so reaching it means arriving.
+    if (enter.x2 === rows[at].col) return commits[at].hash;
+    const cont = rows[at].segments.find((s) => s.y1 === 0.5 && s.x1 === x)!;
+    assert.ok(cont, `row ${at}: pass-through lane at x=${x} continues downwards`);
+    x = cont.x2;
+  }
+  return null;
+}
+
 function checkInvariants(commits: Commit[], rows: GraphRow[]) {
   assert.equal(rows.length, commits.length);
   const indexOf = new Map(commits.map((c, i) => [c.hash, i]));
@@ -104,22 +119,7 @@ function checkInvariants(commits: Commit[], rows: GraphRow[]) {
   rows.forEach((row, r) => {
     const reached: string[] = [];
     for (const start of row.segments.filter((s) => s.y1 === 0.5 && s.x1 === row.col)) {
-      let x = start.x2;
-      let at = r + 1;
-      let arrived: string | null = null;
-      while (at < rows.length) {
-        const enter = rows[at].segments.find((s) => s.y1 === 0 && s.x1 === x)!;
-        assert.ok(enter, `row ${at}: lane at x=${x} continues`);
-        // Pass-through lanes never occupy the node's column, so reaching it means arriving.
-        if (enter.x2 === rows[at].col) {
-          arrived = commits[at].hash;
-          break;
-        }
-        const cont = rows[at].segments.find((s) => s.y1 === 0.5 && s.x1 === x)!;
-        assert.ok(cont, `row ${at}: pass-through lane at x=${x} continues downwards`);
-        x = cont.x2;
-        at++;
-      }
+      const arrived = followEdge(commits, rows, r, start);
       if (arrived) reached.push(arrived);
     }
     const loadedParents = commits[r].parents.filter((p) => indexOf.has(p));
@@ -236,6 +236,38 @@ describe('commit graph layout', () => {
         assert.deepEqual(row.segments, visible);
       });
     }
+  });
+
+  test('a line straight down from a merge always leads to its first parent', () => {
+    let merges = 0;
+    for (let seed = 1; seed <= 400; seed++) {
+      const commits = randomHistory(seed * 101, 40 + (seed % 160));
+      const { rows } = layoutGraph(commits);
+      const loaded = new Set(commits.map((c) => c.hash));
+      rows.forEach((row, r) => {
+        if (!row.isMerge) return;
+        merges++;
+        const straight = row.segments.find((s) => s.y1 === 0.5 && s.x1 === row.col && s.x2 === row.col);
+        if (!straight) return;
+        const reached = followEdge(commits, rows, r, straight);
+        const first = commits[r].parents[0];
+        if (reached !== null || loaded.has(first)) assert.equal(reached, first, `seed ${seed}: straight line below merge ${commits[r].hash}`);
+      });
+    }
+    assert.ok(merges > 500, `checked ${merges} merges`);
+  });
+
+  test('a merge whose first parent is tracked on the left keeps a straight first-parent line', () => {
+    // M is a tip to the right of main; its first parent A is main's commit. Without the extra lane, the
+    // second parent F would be drawn straight below M and look like M's first parent.
+    const commits = [commit('X', ['A']), commit('M', ['A', 'F']), commit('F', ['A']), commit('A', [])];
+    const { rows } = layoutGraph(commits);
+    const m = rows[1];
+    assert.equal(m.col, 1);
+    const straight = m.segments.find((s) => s.y1 === 0.5 && s.x1 === 1 && s.x2 === 1);
+    assert.ok(straight, 'a line continues straight down from M');
+    assert.equal(followEdge(commits, rows, 1, straight!), 'A');
+    checkInvariants(commits, rows);
   });
 
   test('width tracks open lines rather than history length', () => {

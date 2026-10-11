@@ -2782,3 +2782,98 @@ textarea.input {
   padding: 8px 10px;
   font-size: 12px;
 }
+
+/* ---------------------------------------------------------------- History list (M6) */
+.graph-head {
+  position: relative;
+  flex: none;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.graph-resize {
+  position: absolute;
+  top: 0;
+  right: -3px;
+  width: 6px;
+  height: 100%;
+  cursor: col-resize;
+  z-index: 1;
+}
+.graph-resize:hover {
+  background: var(--accent-soft);
+}
+.lane-scroll {
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+  font-size: 10px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.lane-scroll .icon-button {
+  width: 14px;
+  height: 16px;
+  padding: 0;
+}
+.history-month {
+  position: absolute;
+  left: 0;
+  right: 0;
+  display: flex;
+  align-items: center;
+  background: var(--bg-header);
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+.history-month .graph {
+  align-self: stretch;
+  height: 100%;
+}
+.history-month-label {
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  padding-left: 4px;
+}
+.col-author {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.col-author-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.commit-lines {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 2px;
+}
+.commit-line {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+.commit-meta-line {
+  gap: 5px;
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+.commit-meta-author {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.commit-scroll:focus .commit-row.selected .commit-meta-line {
+  color: rgba(255, 255, 255, 0.8);
+}

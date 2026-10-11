@@ -1,4 +1,5 @@
 import { Check, Cloud, GitBranch, Tag } from 'lucide-react';
+import { useLayoutEffect, useRef } from 'react';
 import type { Ref } from '../../shared/types';
 
 export interface BadgeRef {
@@ -43,11 +44,30 @@ function badgeWidth(b: BadgeRef): number {
 }
 
 export function RefBadges({ badges, onContextMenu }: { badges?: BadgeRef[]; onContextMenu?: (e: React.MouseEvent, b: BadgeRef) => void }) {
+  const strip = useRef<HTMLSpanElement>(null);
+  // Badges that don't fit wrap onto a hidden second line, but a wrapped flex box keeps its unwrapped
+  // width. Shrink the strip to the badges actually shown, so the subject follows right after them.
+  useLayoutEffect(() => {
+    const el = strip.current;
+    if (!el || !el.parentElement) return;
+    const fit = () => {
+      el.style.maxWidth = '';
+      const box = el.getBoundingClientRect();
+      const kids = [...el.children].map((c) => c.getBoundingClientRect());
+      if (!kids.length) return;
+      const right = Math.max(...kids.filter((k) => Math.abs(k.top - kids[0].top) < 2).map((k) => k.right));
+      if (right < box.right - 1) el.style.maxWidth = `${Math.ceil(right - box.left)}px`;
+    };
+    fit();
+    const ro = new ResizeObserver(fit);
+    ro.observe(el.parentElement);
+    return () => ro.disconnect();
+  }, [badges]);
   if (!badges?.length) return null;
   // When the row is tight the strip shrinks, but never below the first badge (up to 64px).
   const minWidth = Math.min(64, badgeWidth(badges[0]));
   return (
-    <span className="ref-badges" style={{ minWidth }}>
+    <span className="ref-badges" style={{ minWidth }} ref={strip}>
       {badges.map((b) => (
         <span
           key={b.key}

@@ -9,13 +9,32 @@ export interface Segment {
   color: number;
 }
 
-export interface GraphRow {
-  col: number;
-  color: number;
-  segments: Segment[];
-  width: number;
-  isMerge: boolean;
+/**
+ * One commit's slice of the graph. Segments are stored packed (4 int16 per segment: x1, x2, half,
+ * colour), since a large history can have millions of them; `segments` decodes on demand.
+ */
+export class GraphRow {
+  constructor(
+    readonly col: number,
+    readonly color: number,
+    readonly width: number,
+    readonly isMerge: boolean,
+    readonly packed: Int16Array,
+  ) {}
+
+  get segments(): Segment[] {
+    const out: Segment[] = [];
+    const p = this.packed;
+    for (let i = 0; i < p.length; i += 4) {
+      const bottom = p[i + 2] === 1;
+      out.push({ x1: p[i], y1: bottom ? 0.5 : 0, x2: p[i + 1], y2: bottom ? 1 : 0.5, color: p[i + 3] });
+    }
+    return out;
+  }
 }
+
+/** Colours are only told apart modulo the palette size, so a wrapped counter keeps them in int16. */
+const COLOR_RANGE = 1 << 14;
 
 interface Lane {
   /** The commit this lane is heading towards */
@@ -57,9 +76,9 @@ export class GraphLayout {
     const cap = this.cap;
     for (const c of commits) {
       const before = this.lanes;
-      const segments: Segment[] = [];
-      const add = (x1: number, y1: number, x2: number, y2: number, color: number) => {
-        if (x1 < cap || x2 < cap) segments.push({ x1, y1, x2, y2, color });
+      const segments: number[] = [];
+      const add = (x1: number, y1: number, x2: number, _y2: number, color: number) => {
+        if (x1 < cap || x2 < cap) segments.push(x1, x2, y1 === 0 ? 0 : 1, color % COLOR_RANGE);
       };
 
       // Every lane heading for this commit converges into its node; the node sits in the first one.
@@ -71,32 +90,46 @@ export class GraphLayout {
       before.forEach((l, i) => add(i, 0, l.hash === c.hash ? col : i, 0.5, l.color));
 
       // Lanes for the next row. `from` is the lane's x at the node line, or 'node' if it starts here.
-      const next: { lane: Lane; from: number | 'node' }[] = [];
-      const joins: string[] = [];
       const [first, ...others] = c.parents;
-      // A lane to the right that already heads for the first parent is folded into this commit's
-      // lane, so the first-parent chain keeps its column. One to the left absorbs this lane instead.
       const firstAt = first === undefined ? -1 : before.findIndex((l) => l.hash === first);
-      const firstJoinsLeft = firstAt !== -1 && firstAt < col;
-      for (let i = 0; i <= before.length; i++) {
-        if (i === col && first !== undefined) {
-          if (firstJoinsLeft) joins.push(first);
-          else next.push({ lane: { hash: first, color }, from: 'node' });
+      // Plan the next row without side effects. A lane to the right that already heads for the first
+      // parent is folded into this commit's lane, so the first-parent chain keeps its column; one to
+      // the left absorbs the first-parent edge instead (unless `keepFirst`).
+      type Planned = { lane: Lane; from: number | 'node'; isNew?: boolean };
+      const plan = (keepFirst: boolean) => {
+        const next: Planned[] = [];
+        const joins: string[] = [];
+        let fold: { from: number; color: number } | null = null;
+        for (let i = 0; i <= before.length; i++) {
+          if (i === col && first !== undefined) {
+            if (keepFirst) next.push({ lane: { hash: first, color }, from: 'node' });
+            else joins.push(first);
+          }
+          const l = before[i];
+          if (!l || l.hash === c.hash) continue;
+          if (i === firstAt && firstAt > col) {
+            fold = { from: i, color: l.color };
+            continue;
+          }
+          next.push({ lane: l, from: i });
         }
-        const l = before[i];
-        if (!l || l.hash === c.hash) continue;
-        if (i === firstAt && !firstJoinsLeft) {
-          // Folded into the first parent's lane: draw it sliding over to where that lane continues.
-          const target = next.findIndex((n) => n.lane.hash === first);
-          add(i, 0.5, target, 1, l.color);
-          continue;
+        for (const p of others) {
+          if (next.some((n) => n.lane.hash === p)) joins.push(p);
+          else next.push({ lane: { hash: p, color: -1 }, from: 'node', isNew: true });
         }
-        next.push({ lane: l, from: i });
+        return { next, joins, fold };
+      };
+      let planned = plan(!(firstAt !== -1 && firstAt < col));
+      // A line straight down from a node reads as its first parent. If joining the first parent to the
+      // left would leave another parent directly below the merge, keep the first parent in this
+      // column too; the extra lane converges where that parent is drawn.
+      const below = planned.next[col];
+      if (firstAt !== -1 && firstAt < col && below && below.lane.hash !== first && others.includes(below.lane.hash)) {
+        planned = plan(true);
       }
-      for (const p of others) {
-        if (next.some((n) => n.lane.hash === p)) joins.push(p);
-        else next.push({ lane: { hash: p, color: this.nextColor++ }, from: 'node' });
-      }
+      const { next, joins, fold } = planned;
+      for (const n of next) if (n.isNew) n.lane = { hash: n.lane.hash, color: this.nextColor++ };
+      if (fold) add(fold.from, 0.5, next.findIndex((n) => n.lane.hash === first), 1, fold.color);
 
       next.forEach((n, j) => add(n.from === 'node' ? col : n.from, 0.5, j, 1, n.lane.color));
       for (const p of joins) {
@@ -107,7 +140,7 @@ export class GraphLayout {
       this.lanes = next.map((n) => n.lane);
       const width = Math.max(before.length, this.lanes.length, col + 1);
       this.maxWidth = Math.max(this.maxWidth, width);
-      rows.push({ col, color, segments, width, isMerge: c.parents.length > 1 });
+      rows.push(new GraphRow(col, color % COLOR_RANGE, width, c.parents.length > 1, Int16Array.from(segments)));
     }
     return rows;
   }
@@ -121,3 +154,6 @@ export function layoutGraph(commits: Commit[], opts?: LayoutOptions): { rows: Gr
 }
 
 export const LANE_COLORS = 8;
+
+/** Lanes the History graph lays out; the list can show (and scroll sideways through) up to this many. */
+export const GRAPH_LAYOUT_LANES = 48;

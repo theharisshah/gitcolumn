@@ -73,6 +73,8 @@ export interface Commit {
   email: string;
   date: number; // unix seconds (author date)
   subject: string;
+  /** Unix seconds; used for month sections in History */
+  committerDate?: number;
 }
 
 export interface CommitDetail extends Commit {

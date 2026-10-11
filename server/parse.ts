@@ -166,14 +166,14 @@ export function parseRefs(raw: string): Ref[] {
 // git log
 // ---------------------------------------------------------------------------
 
-export const LOG_FORMAT = ['%H', '%P', '%an', '%ae', '%at', '%s'].join('%x1f') + '%x1e';
+export const LOG_FORMAT = ['%H', '%P', '%an', '%ae', '%at', '%s', '%ct'].join('%x1f') + '%x1e';
 
 export function parseLog(raw: string): Commit[] {
   const commits: Commit[] = [];
   for (const rec of raw.split(RS)) {
     const r = rec.replace(/^\n/, '');
     if (!r) continue;
-    const [hash, parents, author, email, date, subject] = r.split(FS);
+    const [hash, parents, author, email, date, subject, committed] = r.split(FS);
     commits.push({
       hash,
       parents: parents ? parents.split(' ') : [],
@@ -181,6 +181,7 @@ export function parseLog(raw: string): Commit[] {
       email,
       date: Number(date),
       subject: subject ?? '',
+      committerDate: committed ? Number(committed) : undefined,
     });
   }
   return commits;
