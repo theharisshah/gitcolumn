@@ -142,4 +142,74 @@ describe('interactive rebase across merges', () => {
     assert.equal(r.conflicts, true);
     sh(repo, 'rebase', '--abort');
   });
+
+  test('a conflicted merge with other edits made while resolving is refused, naming the files', async () => {
+    sh(repo, 'reset', '-q', '--hard', base);
+    commit('y.txt', 'y\n', 'main y');
+    commit('x.txt', 'main\n', 'main x');
+    sh(repo, 'switch', '-q', '-c', 'side', base);
+    commit('x.txt', 'side\n', 'side x');
+    sh(repo, 'switch', '-q', 'main');
+    try {
+      sh(repo, 'merge', '-q', 'side');
+    } catch {
+      /* conflict */
+    }
+    write('x.txt', 'resolved\n');
+    write('y.txt', 'y\nfix made while resolving\n');
+    sh(repo, 'add', '-A');
+    sh(repo, 'commit', '-q', '--no-edit');
+    const head = sh(repo, 'rev-parse', 'HEAD');
+    const p = await plan();
+    assert.deepEqual([p.merges![0].conflicts, p.merges![0].evil, p.merges![0].paths], [true, true, ['y.txt']]);
+    await assert.rejects(call('rebase.interactive', { base, steps: steps(p, { 'main y': { action: 'reword', message: 'y2' } }) }), /changes of its own \(y\.txt\)/);
+    assert.equal(sh(repo, 'rev-parse', 'HEAD'), head);
+  });
+
+  test('octopus merges: a clean one is recreated, one with changes of its own is refused', async () => {
+    sh(repo, 'reset', '-q', '--hard', base);
+    commit('m.txt', 'm\n', 'M1');
+    for (const b of ['a', 'b']) {
+      sh(repo, 'switch', '-q', '-c', `oct-${b}`, base);
+      commit(`${b}-side.txt`, `${b}\n`, `${b.toUpperCase()}1`);
+    }
+    sh(repo, 'switch', '-q', 'main');
+    sh(repo, 'merge', '-q', '--no-ff', '-m', 'Octopus', 'oct-a', 'oct-b');
+    let p = await plan();
+    assert.deepEqual([p.merges![0].conflicts, p.merges![0].evil], [false, false]);
+    const tree = sh(repo, 'rev-parse', 'HEAD^{tree}');
+    await call('rebase.interactive', { base, steps: steps(p, { A1: { action: 'reword', message: 'A1 again' } }) });
+    assert.equal(sh(repo, 'log', '-1', '--format=%P').split(' ').length, 3, 'still an octopus');
+    assert.equal(sh(repo, 'rev-parse', 'HEAD^{tree}'), tree);
+
+    write('evil.txt', 'only in the merge\n');
+    sh(repo, 'add', 'evil.txt');
+    sh(repo, 'commit', '-q', '--amend', '--no-edit');
+    p = await plan();
+    assert.deepEqual([p.merges![0].evil, p.merges![0].paths], [true, ['evil.txt']]);
+    await assert.rejects(call('rebase.interactive', { base, steps: steps(p, { B1: { action: 'drop' } }) }), /changes of its own/);
+  });
+
+  test('a merge of unrelated histories can be planned and kept', async () => {
+    sh(repo, 'switch', '-q', '--orphan', 'other');
+    sh(repo, 'clean', '-fdq');
+    commit('o.txt', 'o\n', 'O1');
+    sh(repo, 'switch', '-q', 'main');
+    sh(repo, 'merge', '-q', '--allow-unrelated-histories', '-m', 'Import other', 'other');
+    commit('d.txt', 'd\n', 'D');
+    const p = await plan();
+    const imported = p.commits.find((c) => c.subject === 'Import other')!;
+    assert.deepEqual(p.merges!.find((m) => m.hash === imported.hash), { hash: imported.hash, conflicts: false, evil: false });
+    await call('rebase.interactive', { base, steps: steps(p, { D: { action: 'reword', message: 'D2' } }) });
+    assert.equal(sh(repo, 'log', '-1', '--format=%s'), 'D2');
+  });
+
+  test('a subject with a line separator in it doesn’t confuse the todo list', async () => {
+    sh(repo, 'reset', '-q', '--hard', 'HEAD~1');
+    commit('u.txt', 'u\n', 'Fix\u2028thing');
+    const p = await plan();
+    await call('rebase.interactive', { base, steps: steps(p, { A: { action: 'reword', message: 'A2' } }) });
+    assert.ok(subjects().includes('A2'));
+    assert.equal(parentsOfMerge()[0].split(' ').length, 2);
+  });
 });

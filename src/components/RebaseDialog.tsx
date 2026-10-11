@@ -70,9 +70,13 @@ export function RebaseDialog({
   const recreated = mergesMode ? affectedMerges(plan, rows) : new Set<string>();
   const checks = new Map((plan.merges ?? []).map((m) => [m.hash, m]));
   const evil = [...recreated].filter((h) => checks.get(h)?.evil);
+  const unverifiable = [...recreated].filter((h) => checks.get(h)?.unverifiable);
   const conflicting = [...recreated].filter((h) => checks.get(h)?.conflicts);
   if (!error && evil.length) {
-    error = `The merge ${shortHash(evil[0])} contains changes of its own, which recreating it would lose. Only change commits above it.`;
+    const paths = checks.get(evil[0])?.paths;
+    error = `The merge ${shortHash(evil[0])} contains changes of its own${paths?.length ? ` (${paths.join(', ')})` : ''}, which recreating it would lose. Only change commits after it (below it in this list).`;
+  } else if (!error && unverifiable.length) {
+    error = `The merge ${shortHash(unverifiable[0])} can’t be checked (${checks.get(unverifiable[0])?.unverifiable}), so it can’t be recreated safely. Only change commits after it (below it in this list).`;
   }
 
   const changed = rows.some((r, i) => r.action !== 'pick' || r.hash !== plan.commits[i].hash);
@@ -170,7 +174,9 @@ export function RebaseDialog({
               ) : (
                 <span className="rebase-subject">
                   {row.subject}
-                  {(row.action === 'squash' || row.action === 'fixup') && <span className="muted small"> → into the commit above</span>}
+                  {(row.action === 'squash' || row.action === 'fixup') && (
+                    <span className="muted small"> → {mergesMode ? 'into its parent (when it is the previous commit on the same branch)' : 'into the commit above'}</span>
+                  )}
                   {row.action === 'edit' && <span className="muted small"> → pause here to amend</span>}
                 </span>
               )}

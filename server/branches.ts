@@ -8,7 +8,7 @@ import { LOG_FORMAT, parseDiff, parseLog } from './parse.ts';
 import { assertHash, assertSafe, expandHome } from './util.ts';
 
 const FS = '\x1f';
-const FLAG = /^branch\.(.+)\.gitcolumn-(pinned|archived|parent|parent-base)$/i;
+const FLAG = /^branch\.(.+)\.gitcolumn-(pinned|archived|parent|parent-base|restack-pending)$/i;
 
 /** Branches git considers in use: checked out, or being rebased or bisected, in any worktree. */
 export async function branchesInUse(repo: string): Promise<Set<string>> {
@@ -52,6 +52,16 @@ export function parseWorktrees(raw: string, currentPath: string): Worktree[] {
     out.push(wt);
   }
   return out;
+}
+
+/** Children of a renamed branch follow it (their gitcolumn-parent setting names the old name). */
+export async function renameParent(repo: string, from: string, to: string) {
+  const out = await git(repo, ['config', '-z', '--get-regexp', '^branch\\..*\\.gitcolumn-parent$'], { okCodes: [1] });
+  for (const rec of out.split('\0')) {
+    const nl = rec.indexOf('\n');
+    if (nl < 0 || rec.slice(nl + 1) !== from) continue;
+    await git(repo, ['config', '--replace-all', rec.slice(0, nl), to]);
+  }
 }
 
 /** GitColumn's per-branch flags and parents, plus where other worktrees have branches checked out. */
@@ -120,18 +130,21 @@ export const branchesApi: HandlerModule = (ctx) => {
   return {
     /** The branch to compare others with: origin's default branch, then main/master, then init.defaultBranch. */
     async 'branches.defaultBase'({ repo }: { repo: string }): Promise<string | null> {
-      const remoteHead = await git(repo, ['symbolic-ref', '-q', '--short', 'refs/remotes/origin/HEAD']).then((s) => s.trim(), () => '');
-      if (remoteHead) return remoteHead;
+      // Full names, stripped by hand: --short can answer "remotes/origin/main" when a tag or branch has the same name.
+      const remoteHead = await git(repo, ['symbolic-ref', '-q', 'refs/remotes/origin/HEAD']).then((s) => s.trim().replace(/^refs\/remotes\//, ''), () => '');
+      // origin/HEAD can point at a branch that was deleted since.
+      if (remoteHead && (await revParse(repo, `refs/remotes/${remoteHead}`))) return remoteHead;
       for (const name of ['main', 'master', (await ctx.configGet(repo, 'init.defaultBranch')) ?? '']) {
         if (name && (await revParse(repo, `refs/heads/${name}`))) return name;
       }
-      return git(repo, ['symbolic-ref', '-q', '--short', 'HEAD']).then((s) => s.trim() || null, () => null);
+      return git(repo, ['symbolic-ref', '-q', 'HEAD']).then((s) => s.trim().replace(/^refs\/heads\//, '') || null, () => null);
     },
 
     /** Every branch compared with `base`: commits ahead/behind, merged, last commit, flags. */
     async 'branches.review'({ repo, base, includeRemote }: { repo: string; base: string; includeRemote?: boolean }): Promise<BranchReviewRow[]> {
       assertSafe(base);
-      const baseSha = await revParse(repo, base);
+      // A branch name means that branch, even if a tag has the same name (git's own lookup prefers tags).
+      const baseSha = (await revParse(repo, `refs/heads/${base}`)) ?? (await revParse(repo, `refs/remotes/${base}`)) ?? (await revParse(repo, base));
       if (!baseSha) throw new Error(`Unknown base: ${base}`);
       const patterns = includeRemote ? ['refs/heads', 'refs/remotes'] : ['refs/heads'];
       const fast = await supportsAheadBehind(repo);
@@ -204,7 +217,11 @@ export const branchesApi: HandlerModule = (ctx) => {
         assertHash(b.hash);
         if (inUse.has(`refs/heads/${b.name}`)) throw new Error(`${b.name} is checked out, so it can't be deleted.`);
         if (byName.get(b.name)?.pinned) throw new Error(`${b.name} is pinned. Unpin it first.`);
-        if (base && (b.name === base || `refs/heads/${b.name}` === base)) throw new Error(`${b.name} is the base branch.`);
+        // With a remote base (origin/main), the local branch of the same name is protected too.
+        const baseLocal = base?.replace(/^refs\/(heads|remotes)\//, '').replace(/^[^/]+\//, '');
+        if (base && (b.name === base || `refs/heads/${b.name}` === base || (base.includes('/') && b.name === baseLocal && !(await revParse(repo, `refs/heads/${base}`))))) {
+          throw new Error(`${b.name} is the base branch.`);
+        }
       }
       const deleted: { name: string; hash: string; config: [string, string][] }[] = [];
       for (const b of branches) {
@@ -236,6 +253,8 @@ export const branchesApi: HandlerModule = (ctx) => {
       }
       assertSafe(parent);
       if (parent === branch) throw new Error('A branch can’t be its own parent.');
+      // Unchanged: keep the recorded base (it may be an older parent commit, after the parent was amended).
+      if ((await ctx.configGet(repo, `branch.${branch}.gitcolumn-parent`)) === parent) return;
       const below = await stackBelow(repo, branch);
       if (below.includes(parent)) throw new Error(`${parent} is stacked on ${branch}; that would make a loop.`);
       const mergeBase = (await git(repo, ['merge-base', `refs/heads/${parent}`, `refs/heads/${branch}`]).catch(() => '')).trim();
@@ -259,7 +278,9 @@ export const branchesApi: HandlerModule = (ctx) => {
     /**
      * Move a stacked branch (and optionally everything stacked on it) onto its parent's current tip:
      * `git rebase --onto <parent> <recorded base> <branch>` replays only the branch's own commits,
-     * even after the parent was amended or rebased. Stops at the first conflict.
+     * even after the parent was amended or rebased. Stops at the first conflict (the branch is marked
+     * so its base is corrected once the rebase is finished); on other failures it returns to where it
+     * started. Always reports what moved, so it can be undone.
      */
     async 'branch.restack'({
       repo,
@@ -269,32 +290,63 @@ export const branchesApi: HandlerModule = (ctx) => {
       repo: string;
       branch: string;
       children?: boolean;
-    }): Promise<{ moved: { name: string; old: string; new: string; oldBase: string | null }[]; conflicts: boolean; stoppedAt?: string; original: string | null }> {
+    }): Promise<{
+      moved: { name: string; old: string; new: string; oldBase: string | null }[];
+      conflicts: boolean;
+      stoppedAt?: string;
+      error?: string;
+      original: string | null;
+    }> {
       assertSafe(branch);
-      const original = await git(repo, ['symbolic-ref', '-q', '--short', 'HEAD']).then((s) => s.trim() || null, () => null);
+      // Not --short: that gives "heads/x" when a tag named x exists.
+      const original = await git(repo, ['symbolic-ref', '-q', 'HEAD']).then((s) => s.trim().replace(/^refs\/heads\//, '') || null, () => null);
+      const originalHead = await git(repo, ['rev-parse', '--verify', '-q', 'HEAD']).then((s) => s.trim() || null, () => null);
       const order = [branch, ...(children ? await stackBelow(repo, branch) : [])];
       const moved: { name: string; old: string; new: string; oldBase: string | null }[] = [];
-      for (const b of order) {
-        const parent = await ctx.configGet(repo, `branch.${b}.gitcolumn-parent`);
-        if (!parent) {
-          if (b === branch) throw new Error(`${b} isn't stacked on another branch. Use “Track Parent Branch…” first.`);
-          continue;
+      const goBack = async () => {
+        const now = await git(repo, ['rev-parse', '--verify', '-q', 'HEAD']).then((s) => s.trim() || null, () => null);
+        const nowBranch = await git(repo, ['symbolic-ref', '-q', 'HEAD']).then((s) => s.trim().replace(/^refs\/heads\//, '') || null, () => null);
+        if (original && nowBranch !== original) await git(repo, ['switch', '--no-guess', original]);
+        else if (!original && originalHead && (nowBranch || now !== originalHead)) await git(repo, ['switch', '--detach', originalHead]);
+      };
+      try {
+        for (const b of order) {
+          const parent = await ctx.configGet(repo, `branch.${b}.gitcolumn-parent`);
+          if (!parent) {
+            if (b === branch) throw new Error(`${b} isn't stacked on another branch. Use “Track Parent Branch…” first.`);
+            continue;
+          }
+          const parentTip = await revParse(repo, `refs/heads/${parent}`);
+          if (!parentTip) throw new Error(`The parent branch ${parent} no longer exists.`);
+          const tip = (await revParse(repo, `refs/heads/${b}`))!;
+          // A restack that stopped at a conflict and was finished since: the branch is now on that parent commit.
+          const pending = await ctx.configGet(repo, `branch.${b}.gitcolumn-restack-pending`);
+          if (pending) {
+            const finished = await git(repo, ['merge-base', '--is-ancestor', pending, tip]).then(() => true, () => false);
+            if (finished) await setConfig(repo, `branch.${b}.gitcolumn-parent-base`, pending);
+            await setConfig(repo, `branch.${b}.gitcolumn-restack-pending`, null);
+          }
+          const recorded = (await ctx.configGet(repo, `branch.${b}.gitcolumn-parent-base`)) ?? null;
+          const recordedOk = recorded && /^[0-9a-f]{40,64}$/.test(recorded) && (await revParse(repo, recorded));
+          const base = recordedOk ? recorded! : (await git(repo, ['merge-base', `refs/heads/${parent}`, `refs/heads/${b}`])).trim();
+          if (base === parentTip) continue; // already on top of its parent
+          const result = await ctx.withConflicts(repo, () => git(repo, ['rebase', '--onto', parentTip, base, b]));
+          if (result.conflicts) {
+            await setConfig(repo, `branch.${b}.gitcolumn-restack-pending`, parentTip);
+            return { moved, conflicts: true, stoppedAt: b, original };
+          }
+          moved.push({ name: b, old: tip, new: (await revParse(repo, `refs/heads/${b}`))!, oldBase: recorded });
+          await setConfig(repo, `branch.${b}.gitcolumn-parent-base`, parentTip);
         }
-        const parentTip = await revParse(repo, `refs/heads/${parent}`);
-        if (!parentTip) throw new Error(`The parent branch ${parent} no longer exists.`);
-        const recorded = (await ctx.configGet(repo, `branch.${b}.gitcolumn-parent-base`)) ?? null;
-        const recordedOk = recorded && /^[0-9a-f]{40,64}$/.test(recorded) && (await revParse(repo, recorded));
-        const base = recordedOk ? recorded! : (await git(repo, ['merge-base', `refs/heads/${parent}`, `refs/heads/${b}`])).trim();
-        const old = (await revParse(repo, `refs/heads/${b}`))!;
-        if (base === parentTip) continue; // already on top of its parent
-        const result = await ctx.withConflicts(repo, () => git(repo, ['rebase', '--onto', parentTip, base, b]));
-        if (result.conflicts) return { moved, conflicts: true, stoppedAt: b, original };
-        moved.push({ name: b, old, new: (await revParse(repo, `refs/heads/${b}`))!, oldBase: recorded });
-        await setConfig(repo, `branch.${b}.gitcolumn-parent-base`, parentTip);
+        await goBack();
+        return { moved, conflicts: false, original };
+      } catch (e) {
+        const message = e instanceof Error ? e.message : String(e);
+        const rebasing = (await ctx.repoState(repo)).rebasing;
+        if (!rebasing) await goBack().catch(() => undefined);
+        if (!moved.length) throw e;
+        return { moved, conflicts: false, error: message, original };
       }
-      const now = await git(repo, ['symbolic-ref', '-q', '--short', 'HEAD']).then((s) => s.trim() || null, () => null);
-      if (original && now !== original) await git(repo, ['switch', '--no-guess', original]);
-      return { moved, conflicts: false, original };
     },
 
     // ----------------------------------------------------------- worktrees
@@ -307,7 +359,8 @@ export const branchesApi: HandlerModule = (ctx) => {
     },
 
     async 'worktree.add'({ repo, path: target, branch, newBranch, start }: { repo: string; path: string; branch?: string; newBranch?: string; start?: string }) {
-      const dir = expandHome(target);
+      // Relative folders are relative to the repository, not to wherever the app was started.
+      const dir = /^~(\/|$)/.test(target.trim()) ? expandHome(target) : path.resolve(repo, target.trim());
       const existing = await fs.readdir(dir).catch(() => null);
       if (existing && existing.length) throw new Error(`${dir} is not empty.`);
       const args = ['worktree', 'add'];
@@ -327,7 +380,8 @@ export const branchesApi: HandlerModule = (ctx) => {
 
     async 'worktree.remove'({ repo, path: target, force }: { repo: string; path: string; force?: boolean }) {
       const args = ['worktree', 'remove'];
-      if (force) args.push('--force');
+      // Twice: a locked worktree needs it (git worktree remove -f -f).
+      if (force) args.push('--force', '--force');
       args.push('--', target);
       await git(repo, args);
     },
@@ -353,8 +407,8 @@ export const branchesApi: HandlerModule = (ctx) => {
     async 'diff.range'({ repo, from, to, paths }: { repo: string; from: string; to: string; paths?: string[] }): Promise<FileDiff[]> {
       assertSafe(from);
       assertSafe(to);
-      const args = ['diff', '--no-color', '--no-ext-diff', '--src-prefix=a/', '--dst-prefix=b/', '-M', from, to];
-      if (paths?.length) args.push('--', ...paths);
+      const args = ['diff', '--no-color', '--no-ext-diff', '--src-prefix=a/', '--dst-prefix=b/', '-M', from, to, '--'];
+      if (paths?.length) args.push(...paths);
       return parseDiff(await git(repo, args, { maxBytes: 20 * 1024 * 1024 }));
     },
   };

@@ -56,7 +56,9 @@ export function BranchesReview({ base: baseProp }: { base?: string }) {
   const now = Date.now() / 1000;
   const isStale = (r: BranchReviewRow) => now - r.date > staleDays * 86400;
   const baseName = base?.replace(/^refs\/(heads|remotes)\//, '') ?? '';
-  const isBase = (r: BranchReviewRow) => r.name === baseName;
+  // With a remote base (origin/main), the local branch of that name counts as the base too.
+  const baseLocal = baseName.includes('/') && !refs.some((x) => x.type === 'head' && x.name === baseName) ? baseName.replace(/^[^/]+\//, '') : null;
+  const isBase = (r: BranchReviewRow) => r.name === baseName || (r.type === 'head' && r.name === baseLocal);
   const deletable = (r: BranchReviewRow) => r.type === 'head' && !r.current && !r.worktree && !r.pinned && !isBase(r);
   const keyOf = (r: BranchReviewRow) => `${r.ref}@${r.hash}`;
 
@@ -159,8 +161,9 @@ export function BranchesReview({ base: baseProp }: { base?: string }) {
           className="button button-small button-danger-outline"
           disabled={!selected.length}
           onClick={async () => {
-            await actions.deleteBranches(selected.map((r) => ({ name: r.name, hash: r.hash })), baseName);
-            setChecked(new Set());
+            const done = await actions.deleteBranches(selected.map((r) => ({ name: r.name, hash: r.hash })), baseName);
+            // Keep the selection when the user cancels or the delete fails.
+            if (done) setChecked(new Set());
           }}
         >
           <Trash2 size={12} /> Delete {selected.length ? plural(selected.length, 'Branch', 'Branches') : 'Branches'}

@@ -87,10 +87,26 @@ export function Sidebar() {
     for (const list of m.values()) list.sort((a, b) => a.name.localeCompare(b.name));
     return m;
   }, [allHeads, localNames]);
-  const isStacked = (r: Ref) => !!r.parent && localNames.has(r.parent) && r.parent !== r.name;
-  const pinned = useMemo(() => allHeads.filter((r) => r.pinned && !r.archived).sort((a, b) => a.name.localeCompare(b.name)), [allHeads]);
-  const archived = useMemo(() => allHeads.filter((r) => r.archived), [allHeads]);
-  const heads = useMemo(() => allHeads.filter((r) => !r.archived && !r.pinned && (f ? true : !isStacked(r))), [allHeads, f, localNames]);
+  // Branches reachable from a root of the stack forest; members of a parent cycle (hand-edited
+  // config) aren't, and are listed normally instead of disappearing.
+  const nested = useMemo(() => {
+    const out = new Set<string>();
+    const visit = (name: string) => {
+      for (const c of stackChildren.get(name) ?? []) {
+        if (out.has(c.name)) continue;
+        out.add(c.name);
+        visit(c.name);
+      }
+    };
+    for (const r of allHeads) if (!r.archived && !(r.parent && localNames.has(r.parent) && r.parent !== r.name)) visit(r.name);
+    return out;
+  }, [allHeads, stackChildren, localNames]);
+  const isStacked = (r: Ref) => nested.has(r.name);
+  // The checked-out branch is never tucked away in Archived.
+  const isArchived = (r: Ref) => !!r.archived && !r.current;
+  const pinned = useMemo(() => allHeads.filter((r) => r.pinned && !isArchived(r)).sort((a, b) => a.name.localeCompare(b.name)), [allHeads]);
+  const archived = useMemo(() => allHeads.filter(isArchived), [allHeads]);
+  const heads = useMemo(() => allHeads.filter((r) => !isArchived(r) && !r.pinned && (f ? true : !isStacked(r))), [allHeads, f, nested]);
   const tags = useMemo(() => refs.filter((r) => r.type === 'tag').sort((a, b) => b.date - a.date), [refs]);
   const headTree = useMemo(() => buildTree(heads.filter(match), (r) => r.name), [heads, f]);
   const archivedTree = useMemo(() => buildTree(archived.filter(match), (r) => r.name), [archived, f]);
@@ -172,7 +188,8 @@ export function Sidebar() {
     ];
     if (r.type === 'head' && !f && !seen.has(r.name)) {
       seen.add(r.name);
-      for (const c of stackChildren.get(r.name) ?? []) {
+      // Members of a parent cycle are listed at the top level only.
+      for (const c of (stackChildren.get(r.name) ?? []).filter(isStacked)) {
         out.push(...renderRef(c, c.name, depth + 1, `${key}>${c.name}`, <Layers size={13} className="ref-icon stack" />, seen));
       }
     }
@@ -258,7 +275,13 @@ export function Sidebar() {
                     { label: 'Reveal in Finder', disabled: !!wt.prunable, onClick: () => api.reveal(wt.path).catch(() => undefined) },
                     { label: 'Copy Path', onClick: () => copyText(wt.path) },
                     'separator',
-                    { label: 'Remove Worktree…', danger: true, disabled: wt.current || wt.bare, onClick: () => actions.removeWorktree(wt) },
+                    {
+                      label: 'Remove Worktree…',
+                      danger: true,
+                      // The main worktree (listed first) can't be removed; the others can, locked ones with force.
+                      disabled: wt.current || wt.bare || wt.path === worktrees[0]?.path,
+                      onClick: () => actions.removeWorktree(wt),
+                    },
                     { label: 'Prune Missing Worktrees', onClick: () => actions.pruneWorktrees() },
                   ])
                 }

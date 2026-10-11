@@ -473,7 +473,7 @@ export function useActions() {
           });
         }
         if (!c.parents[0]) return ui.toast('warning', 'Editing the first commit isn’t supported');
-        const plan = await api.rebasePlan(path, c.parents[0]).catch((e) => {
+        const plan = await api.rebasePlan(path, c.parents[0], false).catch((e) => {
           ui.toast('error', 'Can’t edit this commit', String(e instanceof Error ? e.message : e));
           return null;
         });
@@ -490,8 +490,11 @@ export function useActions() {
         if (!parent) return ui.toast('warning', 'The first commit has no parent to squash into');
         const grand = await api.revParse(path, `${parent}^`);
         if (!grand) return ui.toast('warning', 'Squashing into the root commit isn’t supported');
-        const plan = await api.rebasePlan(path, grand).catch(() => null);
-        if (!plan) return ui.toast('error', 'That commit is not on the current branch');
+        const plan = await api.rebasePlan(path, grand, false).catch((e) => {
+          ui.toast('error', 'Can’t squash this commit', String(e instanceof Error ? e.message : e));
+          return null;
+        });
+        if (!plan) return;
         const ok = await ui.confirm({
           title: mode === 'squash' ? 'Squash into parent?' : 'Fixup into parent?',
           message:
@@ -510,8 +513,11 @@ export function useActions() {
       /** Quick action: remove a commit from the branch. */
       async dropCommit(c: Commit) {
         const parent = c.parents[0];
-        const plan = await api.rebasePlan(path, parent ?? null).catch(() => null);
-        if (!plan) return ui.toast('error', 'That commit is not on the current branch');
+        const plan = await api.rebasePlan(path, parent ?? null, false).catch((e) => {
+          ui.toast('error', 'Can’t drop this commit', String(e instanceof Error ? e.message : e));
+          return null;
+        });
+        if (!plan) return;
         if (plan.commits.length === 1 && !parent) return ui.toast('warning', 'Can’t drop the only commit');
         const ok = await ui.confirm({
           title: 'Drop commit?',
@@ -984,27 +990,39 @@ export function useActions() {
       /** Move a stacked branch (and optionally its children) onto its parent's newest commit. */
       async restack(ref: Ref, children = false) {
         const label = children ? `Restacking ${ref.name} and its children…` : `Restacking ${ref.name}…`;
-        return run(label, () => api.restack(path, ref.name, children), {
+        const result = await run(label, () => api.restack(path, ref.name, children), {
           success: (r) =>
-            r.conflicts
+            r.conflicts || r.error
               ? undefined
               : r.moved.length
                 ? `Restacked ${r.moved.map((m) => m.name).join(', ')}`
                 : `${ref.name} is already on top of ${ref.parent}`,
+          // Branches moved before a conflict or failure are undoable too.
           undo: (r) => {
-            if (r.conflicts || !r.moved.length) return null;
+            if (!r.moved.length) return null;
             const steps: UndoSpec[] = [];
-            const others = r.moved.filter((m) => m.name !== r.original);
+            // Mid-rebase (conflict) no moved branch is checked out; otherwise the original one is, and is reset instead.
+            const others = r.moved.filter((m) => r.conflicts || m.name !== r.original);
             steps.push({
               kind: 'refs',
               updates: others.map((m) => ({ ref: `refs/heads/${m.name}`, old: m.new, new: m.old })),
               config: r.moved.map((m): [string, string | null] => [`branch.${m.name}.gitcolumn-parent-base`, m.oldBase]),
             });
-            const self = r.moved.find((m) => m.name === r.original);
+            const self = r.conflicts ? undefined : r.moved.find((m) => m.name === r.original);
             if (self) steps.push({ kind: 'head-reset', from: self.new, to: self.old, mode: 'keep', branch: r.original });
             return { label: 'Restack', spec: { kind: 'multi', steps } };
           },
         });
+        if (result?.conflicts) {
+          ui.toast(
+            'warning',
+            `Restack stopped at ${result.stoppedAt} with conflicts`,
+            `Resolve them and continue, or abort.${result.moved.length ? ` Already restacked: ${result.moved.map((m) => m.name).join(', ')} (${modKey}Z undoes them).` : ''}`,
+          );
+        } else if (result?.error) {
+          ui.toast('error', 'Restack stopped', `${result.error}${result.moved.length ? ` Already restacked: ${result.moved.map((m) => m.name).join(', ')} (${modKey}Z undoes them).` : ''}`);
+        }
+        return result;
       },
 
       /** Pull, then push the current branch. */

@@ -54,7 +54,7 @@ import { filesApi } from './files.ts';
 import { reflogApi } from './reflog.ts';
 import { undoApi } from './undo.ts';
 import { ignoreApi } from './ignore.ts';
-import { annotateRefs, branchesApi } from './branches.ts';
+import { annotateRefs, branchesApi, renameParent } from './branches.ts';
 import { checkMerges, rebaseWithMerges } from './rebase.ts';
 import { githubApi } from './github.ts';
 import type { ApiCtx, HandlerModule } from './ctx.ts';
@@ -590,6 +590,7 @@ export function createApi(host: Host): Record<string, Handler> {
       assertSafe(oldName);
       assertSafe(newName);
       await git(repo, ['branch', '-m', oldName, newName]);
+      await renameParent(repo, oldName, newName);
     },
 
     async 'branch.deleteRemote'({ repo, remote, name }: { repo: string; remote: string; name: string }) {
@@ -895,7 +896,8 @@ export function createApi(host: Host): Record<string, Handler> {
     },
 
     // ---------------------------------------------------- interactive rebase
-    async 'rebase.plan'({ repo, base }: { repo: string; base: string | null }): Promise<RebasePlan> {
+    /** `checks: false` skips re-merging every merge (rebase.interactive checks the ones it recreates). */
+    async 'rebase.plan'({ repo, base, checks = true }: { repo: string; base: string | null; checks?: boolean }): Promise<RebasePlan> {
       if (base) {
         assertSafe(base);
         try {
@@ -933,7 +935,7 @@ export function createApi(host: Host): Record<string, Handler> {
           };
         });
       const plan: RebasePlan = { base: baseHash, commits, hasMerges: commits.some((c) => c.parents.length > 1) };
-      if (plan.hasMerges) plan.merges = await checkMerges(repo, plan);
+      if (plan.hasMerges && checks) plan.merges = await checkMerges(repo, plan);
       return plan;
     },
 
@@ -948,7 +950,7 @@ export function createApi(host: Host): Record<string, Handler> {
       if (firstKept.action === 'squash' || firstKept.action === 'fixup') {
         throw new Error('The first commit can’t be squashed — there is no earlier commit in the range to combine it with.');
       }
-      const plan = (await api['rebase.plan']({ repo, base })) as RebasePlan;
+      const plan = (await api['rebase.plan']({ repo, base, checks: false })) as RebasePlan;
       if (plan.hasMerges) {
         if (steps.every((s, i) => s.action === 'pick' && s.hash === plan.commits[i]?.hash)) return { conflicts: false, paused: false };
         // Recreates the merges (git rebase --rebase-merges) instead of flattening them.

@@ -147,7 +147,7 @@ export const api = {
   cherryPick: (repo: string, hash: string) => call<ConflictResult>('cherryPick', { repo, hash }),
   revert: (repo: string, hash: string, parent?: number) => call<ConflictResult>('revert', { repo, hash, parent }),
   reset: (repo: string, hash: string, mode: 'soft' | 'mixed' | 'hard' | 'keep') => call('reset', { repo, hash, mode }),
-  rebasePlan: (repo: string, base: string | null) => call<RebasePlan>('rebase.plan', { repo, base }),
+  rebasePlan: (repo: string, base: string | null, checks = true) => call<RebasePlan>('rebase.plan', { repo, base, checks }),
   rebaseInteractive: (repo: string, base: string | null, steps: RebaseStep[]) =>
     call<ConflictResult & { paused: boolean }>('rebase.interactive', { repo, base, steps }),
   snapshot: (repo: string, paths?: string[]) => call<Snapshot>('snapshot.capture', { repo, paths }),
@@ -172,7 +172,7 @@ export const api = {
   setBranchParent: (repo: string, branch: string, parent: string | null) => call('branch.setParent', { repo, branch, parent }),
   createStackedBranch: (repo: string, name: string, parent: string, checkout = true) => call('branch.createStacked', { repo, name, parent, checkout }),
   restack: (repo: string, branch: string, children = false) =>
-    call<{ moved: { name: string; old: string; new: string; oldBase: string | null }[]; conflicts: boolean; stoppedAt?: string; original: string | null }>(
+    call<{ moved: { name: string; old: string; new: string; oldBase: string | null }[]; conflicts: boolean; stoppedAt?: string; error?: string; original: string | null }>(
       'branch.restack',
       { repo, branch, children },
     ),

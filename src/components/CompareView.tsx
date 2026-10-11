@@ -2,7 +2,7 @@ import { ArrowLeftRight, GitCompare, X } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import type { ChangedFile, Commit, FileDiff } from '../../shared/types';
 import { api } from '../lib/api';
-import { plural, relativeTime, shortHash } from '../lib/format';
+import { relativeTime, shortHash } from '../lib/format';
 import { useRepo } from '../repo/RepoContext';
 import { useUI } from '../ui/UIProvider';
 import { Avatar } from './Avatar';
@@ -12,6 +12,9 @@ import { refsByHash } from './RefBadges';
 import { Splitter, usePersistentSize } from './Splitter';
 
 type Tab = 'commits' | 'files';
+/** log.range returns at most this many commits. */
+const RANGE_LIMIT = 1000;
+const count = (list: unknown[]) => (list.length >= RANGE_LIMIT ? `${RANGE_LIMIT}+` : String(list.length));
 
 /**
  * Two revisions side by side: the commits one has that the other doesn't, and the file changes —
@@ -19,7 +22,9 @@ type Tab = 'commits' | 'files';
  * between the two (two-dot).
  */
 export function CompareView({ base, head, baseLabel, headLabel }: { base: string; head: string; baseLabel?: string; headLabel?: string }) {
-  const { repo, refs, status, version, setView, closeView } = useRepo();
+  const { repo, refs, status, setView, closeView } = useRepo();
+  // Reload when branches move, not on every working copy change (which would reset the view).
+  const refsKey = useMemo(() => refs.map((r) => r.ref + r.hash).join(), [refs]);
   const ui = useUI();
   const [tab, setTab] = useState<Tab>('commits');
   const [threeDot, setThreeDot] = useState(true);
@@ -50,7 +55,7 @@ export function CompareView({ base, head, baseLabel, headLabel }: { base: string
     return () => {
       cancelled = true;
     };
-  }, [repo.path, base, head, version]);
+  }, [repo.path, base, head, refsKey]);
 
   const from = threeDot ? mergeBase : base;
   useEffect(() => {
@@ -74,7 +79,7 @@ export function CompareView({ base, head, baseLabel, headLabel }: { base: string
     return () => {
       cancelled = true;
     };
-  }, [repo.path, from, head, tab, version]);
+  }, [repo.path, from, head, tab, refsKey]);
 
   const badges = useMemo(() => refsByHash(refs, status?.head ?? null, !status?.branch && !!status?.head), [refs, status?.head, status?.branch]);
   const swap = () => setView({ kind: 'compare', base: head, head: base, baseLabel: headLabel, headLabel: baseLabel }, { replace: true });
@@ -95,7 +100,7 @@ export function CompareView({ base, head, baseLabel, headLabel }: { base: string
           {h}
         </span>
         <span className="muted small">
-          {ahead && behind ? `${plural(ahead.length, 'commit')} ahead, ${behind.length} behind` : ''}
+          {ahead && behind ? `${count(ahead)} ${ahead.length === 1 ? 'commit' : 'commits'} ahead, ${count(behind)} behind` : ''}
         </span>
         <span className="spacer" />
         <div className="segmented">
@@ -165,7 +170,7 @@ function CommitGroup({ title, commits, selected, onSelect, muted }: { title: str
   return (
     <div className={`compare-group ${muted ? 'muted-group' : ''}`}>
       <div className="compare-group-title">
-        {title} <span className="muted">{commits ? commits.length : '…'}</span>
+        {title} <span className="muted">{commits ? count(commits) : '…'}</span>
       </div>
       {commits?.map((c) => (
         <div key={c.hash} className={`compare-commit ${selected === c.hash ? 'selected' : ''}`} onMouseDown={() => onSelect(c.hash)}>

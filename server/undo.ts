@@ -5,7 +5,7 @@ import path from 'node:path';
 import type { Snapshot, UndoResult, UndoSpec, UndoState } from '../shared/types.ts';
 import type { HandlerModule } from './ctx.ts';
 import { git, GitError, gitRaw, hashFiles, IndexLockedError, writeTree } from './git.ts';
-import { branchesInUse } from './branches.ts';
+import { branchesInUse, renameParent } from './branches.ts';
 import { ignoreFile } from './ignore.ts';
 import { assertHash, assertRef, assertSafe, insideRepo } from './util.ts';
 
@@ -361,6 +361,22 @@ export const undoApi: HandlerModule = (ctx) => {
     }
   }
 
+  /** Would this step of a multi undo run? Throws the error its execution would, without changing anything. */
+  async function precheck(repo: string, step: UndoSpec) {
+    if (step.kind === 'refs') {
+      const now = await Promise.all(step.updates.map((u) => git(repo, ['rev-parse', '--verify', '-q', u.ref]).then((s) => s.trim() || null, () => null)));
+      if (step.updates.every((u, i) => now[i] === u.new)) return;
+      if (step.updates.some((u, i) => now[i] !== u.old && now[i] !== u.new)) throw new StaleError();
+      const inUse = await branchesInUse(repo);
+      const busy = step.updates.find((u, i) => u.old !== null && now[i] !== u.new && inUse.has(u.ref));
+      if (busy) throw new BlockedError(`${busy.ref.replace(/^refs\/heads\//, '')} is checked out (or being rebased), so it can't be moved yet. Switch away from it, then undo.`);
+    } else if (step.kind === 'head-reset') {
+      const h = await head(repo);
+      if (h !== step.from && h !== step.to) throw new StaleError();
+      if ((await branch(repo)) !== step.branch) throw new StaleError();
+    }
+  }
+
   /** Returns 'already' when every ref was already at its target (a resumed undo, or the user did it). */
   async function refTransaction(repo: string, updates: { ref: string; old: string | null; new: string | null }[]): Promise<'already' | void> {
     if (!updates.length) return;
@@ -368,13 +384,16 @@ export const undoApi: HandlerModule = (ctx) => {
     const now = await Promise.all(updates.map((u) => git(repo, ['rev-parse', '--verify', '-q', u.ref]).then((s) => s.trim() || null, () => null)));
     if (updates.every((u, i) => now[i] === u.new)) return 'already';
     const cmds: string[] = [];
-    const inUse = updates.some((u) => u.new === null) ? await branchesInUse(repo) : new Set<string>();
-    for (const u of updates) {
+    // A branch that is checked out (or being rebased) somewhere must not be moved or deleted under it:
+    // its working tree would no longer match.
+    const inUse = updates.some((u, i) => u.old !== null && now[i] !== u.new) ? await branchesInUse(repo) : new Set<string>();
+    for (const [i, u] of updates.entries()) {
       assertRef(u.ref);
       if (u.old) assertHash(u.old);
       if (u.new) assertHash(u.new);
-      if (u.new === null && inUse.has(u.ref)) {
-        throw new BlockedError(`${u.ref.replace(/^refs\/heads\//, '')} is checked out (or being rebased), so it can't be deleted yet.`);
+      if (u.old !== null && now[i] !== u.new && inUse.has(u.ref)) {
+        const name = u.ref.replace(/^refs\/heads\//, '');
+        throw new BlockedError(`${name} is checked out (or being rebased), so it can't be ${u.new === null ? 'deleted' : 'moved'} yet. Switch away from it, then undo.`);
       }
       if (u.new === null && u.old) cmds.push(`delete ${u.ref}`, u.old);
       else if (u.old === null && u.new) cmds.push(`create ${u.ref}`, u.new);
@@ -493,6 +512,7 @@ export const undoApi: HandlerModule = (ctx) => {
         }
         if (current !== spec.hash || original) throw new StaleError();
         await git(repo, ['branch', '-m', spec.to, spec.from]);
+        await renameParent(repo, spec.to, spec.from);
         return {};
       }
       case 'upstream': {
@@ -582,6 +602,8 @@ export const undoApi: HandlerModule = (ctx) => {
         return skipped.length ? { note: `Not restored (not allowed): ${skipped.join(', ')}` } : {};
       }
       case 'multi': {
+        // Check every step before changing anything, so a refusal never leaves the undo half done.
+        for (const step of spec.steps) await precheck(repo, step);
         // In order; each step resumes (refs already in place, HEAD already reset) if an earlier try got halfway.
         for (const step of spec.steps) await execute(repo, step, undefined);
         return {};
@@ -701,7 +723,11 @@ export const undoApi: HandlerModule = (ctx) => {
     /** branch.<name>.* settings worth restoring when an undo recreates the branch. */
     async 'config.branchEntries'({ repo, branch: name }: { repo: string; branch: string }): Promise<[string, string][]> {
       assertSafe(name);
-      return (await configEntries(repo, `^branch\\.${escapeRegExp(name)}\\.`)).filter(([k]) => BRANCH_KEY.test(k));
+      // Only branch.<name>.<var>: the pattern also matches the settings of e.g. "<name>.2".
+      const prefix = `branch.${name}.`.toLowerCase();
+      return (await configEntries(repo, `^branch\\.${escapeRegExp(name)}\\.`)).filter(
+        ([k]) => BRANCH_KEY.test(k) && k.toLowerCase().startsWith(prefix) && !k.slice(prefix.length).includes('.'),
+      );
     },
 
     /** Everything `git remote remove <name>` deletes from the config, for undoing it. */

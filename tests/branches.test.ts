@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import fs, { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { after, beforeEach, describe, test } from 'node:test';
@@ -200,6 +200,92 @@ describe('branches', () => {
     const r = await call<{ conflicts: boolean; stoppedAt: string }>('branch.restack', { branch: 'c' });
     assert.deepEqual([r.conflicts, r.stoppedAt], [true, 'c']);
     sh(repo, 'rebase', '--abort');
+  });
+
+  test('restack from a detached HEAD returns there; a branch checked out elsewhere blocks the undo', async () => {
+    sh(repo, 'switch', '-q', '-c', 'p');
+    commitFile('p.txt', 'p1\n', 'p');
+    await call('branch.createStacked', { name: 'c', parent: 'p' });
+    commitFile('c.txt', 'c\n', 'c');
+    sh(repo, 'switch', '-q', 'p');
+    commitFile('p.txt', 'p2\n', 'p more');
+    const detachedAt = at('main');
+    sh(repo, 'switch', '-q', '--detach', 'main');
+    const r = await call<{ moved: { name: string; old: string; new: string; oldBase: string | null }[]; original: string | null }>('branch.restack', { branch: 'c' });
+    assert.equal(r.original, null);
+    assert.equal(at('HEAD'), detachedAt);
+    assert.throws(() => sh(repo, 'symbolic-ref', '-q', 'HEAD'), 'still detached');
+    const spec: UndoSpec = {
+      kind: 'multi',
+      steps: [{ kind: 'refs', updates: r.moved.map((m) => ({ ref: `refs/heads/${m.name}`, old: m.new, new: m.old })), config: [] }],
+    };
+    await call('undo.push', { label: 'Restack', spec });
+    sh(repo, 'switch', '-q', 'c'); // now it's checked out: the undo must not move it under the working tree
+    await assert.rejects(call('undo.run'), /checked out/);
+    assert.equal(at('c'), r.moved[0].new);
+    sh(repo, 'switch', '-q', 'main');
+    await call('undo.run');
+    assert.equal(at('c'), r.moved[0].old);
+  });
+
+  test('a restack finished after a conflict records the new base', async () => {
+    sh(repo, 'switch', '-q', '-c', 'p');
+    commitFile('x.txt', 'p\n', 'p');
+    await call('branch.createStacked', { name: 'c', parent: 'p' });
+    commitFile('x.txt', 'c\n', 'c changes x');
+    sh(repo, 'switch', '-q', 'p');
+    write('x.txt', 'p amended\n');
+    sh(repo, 'commit', '-q', '-a', '--amend', '-m', 'p amended');
+    const r = await call<{ conflicts: boolean }>('branch.restack', { branch: 'c' });
+    assert.equal(r.conflicts, true);
+    write('x.txt', 'resolved\n');
+    sh(repo, 'add', 'x.txt');
+    execFileSync('git', ['-c', 'core.editor=true', 'rebase', '--continue'], { cwd: repo });
+    // Next restack: nothing to replay, and the base is the amended parent.
+    const again = await call<{ moved: unknown[]; conflicts: boolean }>('branch.restack', { branch: 'c' });
+    assert.deepEqual([again.moved.length, again.conflicts], [0, false]);
+    assert.equal(sh(repo, 'config', 'branch.c.gitcolumn-parent-base'), at('p'));
+  });
+
+  test('renaming a parent keeps its children stacked on it; re-saving the same parent keeps the base', async () => {
+    sh(repo, 'branch', 'p');
+    await call('branch.createStacked', { name: 'c', parent: 'p', checkout: false });
+    const base = sh(repo, 'config', 'branch.c.gitcolumn-parent-base');
+    await call('branch.rename', { oldName: 'p', newName: 'parent' });
+    assert.equal(sh(repo, 'config', 'branch.c.gitcolumn-parent'), 'parent');
+    await call('branch.setParent', { branch: 'c', parent: 'parent' });
+    assert.equal(sh(repo, 'config', 'branch.c.gitcolumn-parent-base'), base);
+  });
+
+  test('review details: base beats a same-named tag; local twin of a remote base is protected; settings of v1 ≠ v1.2', async () => {
+    sh(repo, 'branch', 'side');
+    commitFile('m.txt', 'm\n', 'main moves');
+    sh(repo, 'tag', 'side', 'HEAD'); // a tag named like the base branch, pointing elsewhere
+    const rows = await call<BranchReviewRow[]>('branches.review', { base: 'side' });
+    assert.equal(rows.find((r) => r.name === 'main')!.ahead, 1, 'compared with the branch, not the tag');
+    sh(repo, 'tag', '-d', 'side');
+
+    sh(repo, 'update-ref', 'refs/remotes/origin/main', at('main'));
+    sh(repo, 'switch', '-q', 'side');
+    await assert.rejects(call('branches.deleteMany', { branches: [{ name: 'main', hash: at('main') }], base: 'origin/main' }), /base branch/);
+
+    sh(repo, 'branch', 'v1');
+    sh(repo, 'branch', 'v1.2');
+    sh(repo, 'config', 'branch.v1.remote', 'origin');
+    sh(repo, 'config', 'branch.v1.2.remote', 'fork');
+    const entries = await call<[string, string][]>('config.branchEntries', { branch: 'v1' });
+    assert.deepEqual(entries, [['branch.v1.remote', 'origin']]);
+  });
+
+  test('worktree folders are relative to the repository; a file named like a branch does not confuse diffs', async () => {
+    const r = await call<{ path: string }>('worktree.add', { path: '../relative-wt', newBranch: 'wt-branch', start: 'main' });
+    assert.equal(r.path, path.join(fs.realpathSync(root), 'relative-wt'));
+    await call('worktree.remove', { path: r.path });
+
+    commitFile('feature', 'a file named like a branch\n', 'file');
+    sh(repo, 'branch', 'feature', 'HEAD~1');
+    const diffs = await call<FileDiff[]>('diff.range', { from: 'feature', to: 'main' });
+    assert.deepEqual(diffs.map((d) => d.newPath), ['feature']);
   });
 
   test('compare: merge base, commits in a range, range diff', async () => {

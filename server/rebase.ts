@@ -1,7 +1,7 @@
 // Interactive rebase of ranges that contain merge commits (git rebase --rebase-merges).
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import type { RebasePlan, RebaseStep } from '../shared/types.ts';
+import type { RebaseMergeCheck, RebasePlan, RebaseStep } from '../shared/types.ts';
 import { affectedMerges } from '../shared/rebase.ts';
 import { git } from './git.ts';
 import { shellQuote } from './util.ts';
@@ -28,7 +28,8 @@ let afterCommit = false;
 for (const line of fs.readFileSync(todoPath, 'utf8').split('\n')) {
   const t = line.trim();
   if (!t || t.startsWith('#')) { out.push(line); continue; }
-  const m = /^(?:pick|p)\s+([0-9a-f]+)(.*)$/.exec(t);
+  // [\s\S]: a subject can contain a bare CR or U+2028, which '.' doesn't match.
+  const m = /^(?:pick|p)\s+([0-9a-f]+)([\s\S]*)$/.exec(t);
   if (!m) {
     out.push(line);
     afterCommit = false; // label, reset, merge, update-ref…: a squash can't reach across these
@@ -53,32 +54,78 @@ if (missing.length) fail('git left out ' + missing.length + ' of the planned com
 fs.writeFileSync(todoPath, out.join('\n'));
 `;
 
-export interface MergeCheck {
-  hash: string;
-  /** Recreating it automatically gives conflicts (they were resolved by hand originally) */
-  conflicts: boolean;
-  /** The merge commit contains changes beyond the automatic merge ("evil merge"); recreating it would lose them */
-  evil: boolean;
+/** Identity for the scratch commits an octopus check creates (they're never referenced). */
+const SCRATCH_IDENT = {
+  GIT_AUTHOR_NAME: 'gitcolumn',
+  GIT_AUTHOR_EMAIL: 'gitcolumn@localhost',
+  GIT_COMMITTER_NAME: 'gitcolumn',
+  GIT_COMMITTER_EMAIL: 'gitcolumn@localhost',
+};
+
+/** `git merge-tree` of two commits: the resulting tree (with conflict markers) and the conflicted paths. */
+async function mergeTree(repo: string, a: string, b: string): Promise<{ tree: string; conflicted: string[] }> {
+  // One line (the tree) when it merges cleanly; with conflicts, the conflicted paths follow (exit code 1).
+  const out = await git(repo, ['merge-tree', '--write-tree', '--name-only', '--no-messages', '--allow-unrelated-histories', a, b], { okCodes: [1] });
+  const [tree, ...paths] = out.trim().split('\n');
+  return { tree, conflicted: paths.filter(Boolean) };
 }
 
-/** Re-merge each merge's parents with `git merge-tree` to see whether git can recreate it as it was. */
-export async function checkMerges(repo: string, plan: RebasePlan): Promise<MergeCheck[]> {
-  const out: MergeCheck[] = [];
-  for (const c of plan.commits) {
-    if (c.parents.length !== 2) {
-      if (c.parents.length > 2) out.push({ hash: c.hash, conflicts: true, evil: false });
-      continue;
+/**
+ * Re-merge one merge's parents the way `git rebase --rebase-merges` will, and compare the result
+ * with the merge as it is. An octopus is merged one parent at a time, like git's octopus strategy.
+ */
+async function checkMerge(repo: string, hash: string, parents: string[]): Promise<RebaseMergeCheck> {
+  try {
+    let head = parents[0];
+    let result = { tree: '', conflicted: [] as string[] };
+    const conflicted = new Set<string>();
+    for (const [i, p] of parents.slice(1).entries()) {
+      result = await mergeTree(repo, head, p);
+      result.conflicted.forEach((f) => conflicted.add(f));
+      if (i < parents.length - 2) {
+        // A dangling scratch commit, so the next merge-tree finds the right merge base.
+        const args = ['commit-tree', result.tree, ...parents.slice(0, i + 2).flatMap((x) => ['-p', x]), '-m', 'gitcolumn merge check'];
+        head = (await git(repo, args, { env: SCRATCH_IDENT })).trim();
+      }
     }
-    // One line (the tree) when it merges cleanly; with conflicts, the conflicted paths follow (exit code 1).
-    const [merged, tree] = await Promise.all([
-      git(repo, ['merge-tree', '--write-tree', '--name-only', '--no-messages', c.parents[0], c.parents[1]], { okCodes: [1] }),
-      git(repo, ['rev-parse', `${c.hash}^{tree}`]).then((s) => s.trim()),
-    ]);
-    const lines = merged.trim().split('\n');
-    const conflicted = lines.length > 1;
-    out.push({ hash: c.hash, conflicts: conflicted, evil: !conflicted && lines[0] !== tree });
+    // Paths that differ from the merge as committed. Conflicted ones were resolved by hand, and the
+    // user resolves them again; anything else would silently change ("evil merge").
+    const changed = (await git(repo, ['diff-tree', '-r', '--name-only', '--no-renames', '-z', result.tree, `${hash}^{tree}`]))
+      .split('\0')
+      .filter(Boolean);
+    const lost = changed.filter((f) => !conflicted.has(f));
+    return { hash, conflicts: conflicted.size > 0, evil: lost.length > 0, ...(lost.length ? { paths: lost.slice(0, 5) } : {}) };
+  } catch (e) {
+    const why = e instanceof Error ? e.message.split('\n')[0] : String(e);
+    return { hash, conflicts: false, evil: false, unverifiable: why || 'git couldn’t re-merge its parents' };
   }
+}
+
+/** Check whether git can recreate each merge in the plan as it was (a few at a time). */
+export async function checkMerges(repo: string, plan: RebasePlan, only?: Set<string>): Promise<RebaseMergeCheck[]> {
+  const merges = plan.commits.filter((c) => c.parents.length > 1 && (!only || only.has(c.hash)));
+  const out: RebaseMergeCheck[] = new Array(merges.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < merges.length) {
+      const i = next++;
+      out[i] = await checkMerge(repo, merges[i].hash, merges[i].parents);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(6, merges.length) }, worker));
   return out;
+}
+
+/** Why recreating these merges would lose something, or null when it's safe. */
+export function mergeProblem(checks: RebaseMergeCheck[]): string | null {
+  const evil = checks.find((c) => c.evil);
+  if (evil) {
+    const files = evil.paths?.length ? ` (${evil.paths.join(', ')})` : '';
+    return `The merge ${evil.hash.slice(0, 7)} contains changes of its own${files}, beyond merging its parents. Recreating it would lose them, so this rebase isn’t possible.`;
+  }
+  const unknown = checks.find((c) => c.unverifiable);
+  if (unknown) return `The merge ${unknown.hash.slice(0, 7)} can’t be checked (${unknown.unverifiable}), so it isn’t safe to recreate it.`;
+  return null;
 }
 
 /**
@@ -102,13 +149,8 @@ export async function rebaseWithMerges(opts: {
   if (steps.some((s) => merges.has(s.hash) && s.action !== 'pick')) throw new Error('Merge commits can only be kept as they are.');
   const affected = affectedMerges(plan, steps);
   if (affected.size) {
-    const checks = await checkMerges(repo, { ...plan, commits: plan.commits.filter((c) => affected.has(c.hash)) });
-    const evil = checks.filter((c) => c.evil);
-    if (evil.length) {
-      throw new Error(
-        `The merge ${evil[0].hash.slice(0, 7)} contains changes of its own (beyond merging its parents). Recreating it would lose them, so this rebase isn’t possible.`,
-      );
-    }
+    const problem = mergeProblem(await checkMerges(repo, plan, affected));
+    if (problem) throw new Error(problem);
   }
 
   const dir = path.join(opts.gitDir, 'gitcolumn-rebase');

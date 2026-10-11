@@ -308,6 +308,10 @@ export interface RebaseMergeCheck {
   conflicts: boolean;
   /** It contains changes beyond merging its parents; recreating it would lose them */
   evil: boolean;
+  /** A few of the paths that would lose their changes */
+  paths?: string[];
+  /** Why git couldn't re-merge it to check (it's treated as unsafe to recreate) */
+  unverifiable?: string;
 }
 
 export interface RebasePlan {

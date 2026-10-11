@@ -30,7 +30,7 @@ export function useRefMenu() {
       else if (!r.current) items.push({ label: 'Check Out in New Worktree…', onClick: () => actions.checkoutInWorktree(r, app.openRepo) });
       items.push('separator');
       items.push({ label: r.pinned ? 'Unpin' : 'Pin to Top', onClick: () => actions.setFlag(r, 'pinned', !r.pinned) });
-      items.push({ label: r.archived ? 'Unarchive' : 'Archive', disabled: r.current, onClick: () => actions.setFlag(r, 'archived', !r.archived) });
+      items.push({ label: r.archived ? 'Unarchive' : 'Archive', disabled: r.current && !r.archived, onClick: () => actions.setFlag(r, 'archived', !r.archived) });
       items.push('separator');
       if (r.current) {
         if (r.upstream) items.push({ label: 'Sync (Pull, then Push)', onClick: () => actions.sync() });
