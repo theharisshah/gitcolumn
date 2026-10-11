@@ -116,13 +116,15 @@ export const api = {
   unstage: (repo: string, paths: string[]) => call('unstage', { repo, paths }),
   unstageAll: (repo: string) => call('unstageAll', { repo }),
   discard: (repo: string, files: FileStatus[]) => call('discard', { repo, files }),
-  applyPatch: (repo: string, diff: FileDiff, selection: LineSelection, action: PatchAction) =>
-    call('patch.apply', { repo, diff, selection, action }),
+  applyPatch: (repo: string, diff: FileDiff, selection: LineSelection, action: PatchAction, unidiffZero = false) =>
+    call('patch.apply', { repo, diff, selection, action, unidiffZero }),
   resolveConflict: (repo: string, path: string, side: 'ours' | 'theirs', conflictType?: string) =>
     call('conflict.resolve', { repo, path, side, conflictType }),
 
   commit: (repo: string, message: string, amend?: boolean, opts: { signoff?: boolean; only?: boolean } = {}) =>
     call('commit', { repo, message, amend, ...opts }),
+  commitTemplate: (repo: string) => call<string | null>('commit.template', { repo }),
+  author: (repo: string) => call<{ name: string; email: string } | null>('identity.author', { repo }),
   checkout: (repo: string, branch: string) => call('checkout', { repo, branch }),
   checkoutDetached: (repo: string, ref: string) => call('checkout.detached', { repo, ref }),
   checkoutRemote: (repo: string, remoteBranch: string, localName: string) =>
@@ -156,6 +158,10 @@ export const api = {
   branchConfig: (repo: string, branch: string) => call<[string, string][]>('config.branchEntries', { repo, branch }),
   remoteConfig: (repo: string, name: string) => call<[string, string][]>('config.remoteEntries', { repo, name }),
   remoteTrackingRefs: (repo: string, name: string) => call<[string, string][]>('refs.remoteTracking', { repo, name }),
+  ignoreInfo: (repo: string, path: string) =>
+    call<{ isDir: boolean; tracked: boolean; suggestions: { pattern: string; label: string }[] }>('ignore.info', { repo, path }),
+  ignoreAdd: (repo: string, patterns: string[], target: 'gitignore' | 'exclude', untrack?: string[]) =>
+    call<{ file: 'gitignore' | 'exclude'; before: string | null; after: string }>('ignore.add', { repo, patterns, target, untrack }),
   submodules: (repo: string) => call<Submodule[]>('submodules', { repo }),
   updateSubmodule: (repo: string, path?: string) => call('submodule.update', { repo, path }),
   addSubmodule: (repo: string, url: string, path: string) => call('submodule.add', { repo, url, path }),

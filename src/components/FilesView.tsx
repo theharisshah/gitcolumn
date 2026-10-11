@@ -86,6 +86,7 @@ export function FilesBrowser({ rev, initialPath, compact }: { rev: string | null
     if (entry.type === 'tree') items.push({ label: 'Export This Folder…', onClick: () => actions.exportFiles(rev ?? 'HEAD', rev ?? 'HEAD', entry.path) });
     if (rev === null) {
       items.push('separator');
+      items.push({ label: 'Ignore…', onClick: () => actions.ignore(entry.path) });
       items.push({ label: 'Reveal in Finder', onClick: () => api.reveal(repo.path, entry.path).catch((err) => ui.toast('error', 'Could not reveal', String(err))) });
       if (entry.type !== 'tree') items.push({ label: 'Open with Default App', onClick: () => api.openPath(repo.path, entry.path).catch((err) => ui.toast('error', 'Could not open', String(err))) });
     }

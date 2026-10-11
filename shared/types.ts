@@ -348,6 +348,8 @@ export type UndoSpec =
   | { kind: 'stash-apply'; snapshot: Snapshot; restore?: { hash: string; message: string } }
   | { kind: 'stash-drop'; hash: string; message: string }
   | { kind: 'remote-add'; name: string }
+  /** Patterns added to .gitignore or .git/info/exclude (content before/after), optionally untracking files (old index tree) */
+  | { kind: 'ignore'; file: 'gitignore' | 'exclude'; before: string | null; after: string; index?: string | null; head: string | null }
   /**
    * Every remote.<name>.* value plus the branch.*.remote/merge/pushRemote and remote.pushDefault values
    * that pointed at it, and its remote-tracking refs (restored when their objects still exist).

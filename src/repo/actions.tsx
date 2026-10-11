@@ -134,7 +134,7 @@ export function useActions() {
         return run('Unstaging…', () => api.unstageAll(path), { undo: undoIndex('Unstage All', before) });
       },
 
-      async applyPatch(diff: FileDiff, selection: LineSelection, action: PatchAction) {
+      async applyPatch(diff: FileDiff, selection: LineSelection, action: PatchAction, unidiffZero = false) {
         const file = diff.newPath || diff.oldPath;
         if (action === 'discard') {
           const ok = await ui.confirm({
@@ -147,7 +147,7 @@ export function useActions() {
         }
         const before = await api.snapshot(path, action === 'discard' ? [file] : undefined);
         const label = action === 'stage' ? 'Stage Lines' : action === 'unstage' ? 'Unstage Lines' : 'Discard Lines';
-        return run(action === 'stage' ? 'Staging…' : action === 'unstage' ? 'Unstaging…' : 'Discarding…', () => api.applyPatch(path, diff, selection, action), {
+        return run(action === 'stage' ? 'Staging…' : action === 'unstage' ? 'Unstaging…' : 'Discarding…', () => api.applyPatch(path, diff, selection, action, unidiffZero), {
           undo: () => (action === 'discard' ? { label, spec: { kind: 'files', snapshot: before } } : undoIndex(label, before)()),
           success: action === 'discard' ? 'Changes discarded' : undefined,
         });
@@ -171,14 +171,14 @@ export function useActions() {
         });
       },
 
-      async commit(message: string, opts: { amend?: boolean; stageAll?: boolean; undoable?: boolean } = {}) {
+      async commit(message: string, opts: { amend?: boolean; stageAll?: boolean; undoable?: boolean; signoff?: boolean } = {}) {
         const before = await api.snapshot(path);
         const subject = message.split('\n')[0];
         return run(
           opts.amend ? 'Amending commit…' : 'Committing…',
           async () => {
             if (opts.stageAll) await api.stageAll(path);
-            await api.commit(path, message, opts.amend);
+            await api.commit(path, message, opts.amend, { signoff: opts.signoff });
             return true;
           },
           {
@@ -831,6 +831,56 @@ export function useActions() {
         if (!v) return false;
         await run('Saving identity…', () => api.setIdentity(path, String(v.name), String(v.email), !!v.global));
         return true;
+      },
+
+      /** Add a .gitignore / info/exclude pattern for a path, optionally untracking it (undoable). */
+      async ignore(filePath: string) {
+        let info;
+        try {
+          info = await api.ignoreInfo(path, filePath);
+        } catch (e) {
+          return ui.toast('error', 'Can’t ignore this path', e instanceof Error ? e.message : String(e));
+        }
+        const v = await ui.form({
+          title: `Ignore “${filePath.split('/').pop()}”`,
+          message: 'Git stops listing matching untracked files. Already tracked files stay tracked unless you stop tracking them.',
+          fields: [
+            {
+              name: 'choice',
+              type: 'radio',
+              value: info.suggestions[0].pattern,
+              options: info.suggestions.map((s) => ({ value: s.pattern, label: s.label, description: s.pattern })),
+            },
+            { name: 'pattern', label: 'Pattern', value: info.suggestions[0].pattern, mono: true, required: true, hint: 'Edit to use any .gitignore pattern' },
+            {
+              name: 'target',
+              label: 'Add to',
+              type: 'select',
+              value: 'gitignore',
+              options: [
+                { value: 'gitignore', label: '.gitignore — shared with everyone (commit it)' },
+                { value: 'exclude', label: '.git/info/exclude — only in this clone' },
+              ],
+            },
+            ...(info.tracked
+              ? [{ name: 'untrack', type: 'checkbox' as const, value: true, label: 'Stop tracking it (removes it from the repository, keeps your copy)' }]
+              : []),
+          ],
+          onChange: (name, values) => (name === 'choice' ? { pattern: values.choice } : undefined),
+          validate: (values) => (/[\r\n]/.test(String(values.pattern)) || !String(values.pattern).trim() ? 'Enter one pattern' : null),
+          confirmLabel: 'Ignore',
+        });
+        if (!v) return;
+        const pattern = String(v.pattern).trim();
+        const untrack = info.tracked && !!v.untrack ? [filePath] : [];
+        const before = await api.snapshot(path);
+        return run('Ignoring…', () => api.ignoreAdd(path, [pattern], v.target === 'exclude' ? 'exclude' : 'gitignore', untrack), {
+          success: (r) => (r.before === r.after && !untrack.length ? `“${pattern}” was already ignored` : `Ignored ${pattern}`),
+          undo: (r) =>
+            r && (r.before !== r.after || untrack.length)
+              ? { label: 'Ignore', spec: { kind: 'ignore', file: r.file, before: r.before, after: r.after, index: untrack.length ? before.index : null, head: before.head } }
+              : null,
+        });
       },
 
       showFileHistory: (filePath: string, rev?: string | null) => setView({ kind: 'file', path: filePath, mode: 'history', rev }),

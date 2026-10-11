@@ -43,18 +43,22 @@ export function buildPatch(diff: FileDiff, selection: LineSelection, mode: 'forw
 
     if (changes === 0) return;
 
+    // Unified diff convention: a side's start is its first line, or for a zero-length side the line
+    // *before* the hunk. Without context lines (-U0) git apply positions hunks by these numbers alone.
+    // The side git matches against is kept whole (old side forward, new side reverse), so its start
+    // comes from the hunk; the other side is derived from the number of lines before the hunk.
+    const startFrom = (linesBefore: number, count: number) => (count > 0 ? linesBefore + 1 : linesBefore);
     let oldStart: number;
     let newStart: number;
     if (mode === 'forward') {
       oldStart = hunk.oldStart;
-      newStart = hunk.oldStart + delta;
+      const before = hunk.oldLines > 0 ? hunk.oldStart - 1 : hunk.oldStart;
+      newStart = startFrom(before + delta, newCount);
     } else {
       newStart = hunk.newStart;
-      oldStart = hunk.newStart - delta;
+      const before = hunk.newLines > 0 ? hunk.newStart - 1 : hunk.newStart;
+      oldStart = startFrom(before - delta, oldCount);
     }
-    // A zero-length side points at the line *before* the hunk.
-    if (oldCount === 0 && oldStart > 0 && hunk.oldLines !== 0) oldStart--;
-    if (newCount === 0 && newStart > 0 && hunk.newLines !== 0) newStart--;
     delta += newCount - oldCount;
 
     out.push(`@@ -${oldStart},${oldCount} +${newStart},${newCount} @@${hunk.section ? ' ' + hunk.section : ''}`);

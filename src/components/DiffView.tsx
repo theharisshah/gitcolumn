@@ -20,13 +20,15 @@ interface DiffViewProps {
   mode?: DiffMode;
   onApply?: (selection: LineSelection, action: PatchAction) => void;
   images?: ImageSources;
+  /** Wrap long lines (default) or scroll them horizontally with a sticky gutter */
+  wrap?: boolean;
 }
 
 const LARGE_DIFF = 5000;
 const LFS_POINTER = 'version https://git-lfs.github.com/spec/v1';
 
 /** Hunks of a single file diff, with optional hunk / line staging controls. */
-export const DiffView = memo(function DiffView({ diff, mode = 'readonly', onApply, images }: DiffViewProps) {
+export const DiffView = memo(function DiffView({ diff, mode = 'readonly', onApply, images, wrap = true }: DiffViewProps) {
   const [selection, setSelection] = useState<Map<number, Set<number>>>(new Map());
   const [showLarge, setShowLarge] = useState(false);
   const drag = useRef<{ hunk: number; select: boolean } | null>(null);
@@ -86,7 +88,7 @@ export const DiffView = memo(function DiffView({ diff, mode = 'readonly', onAppl
   };
 
   return (
-    <div className={`diff ${canPartial ? 'diff-selectable' : ''}`}>
+    <div className={`diff ${canPartial ? 'diff-selectable' : ''} ${wrap ? '' : 'nowrap'}`}>
       {isLfs && (
         <div className="diff-note lfs-note">
           <HardDrive size={13} /> Git LFS pointer — the file's content is stored in Git LFS. The pointer change is shown below.
@@ -115,7 +117,7 @@ export const DiffView = memo(function DiffView({ diff, mode = 'readonly', onAppl
 });
 
 function HunkActions({ mode, count, onAction }: { mode: DiffMode; count: number; onAction: (a: PatchAction) => void }) {
-  const what = count ? (count === 1 ? 'Line' : `${count} Lines`) : 'Hunk';
+  const what = count ? (count === 1 ? 'Line' : `${count} Lines`) : 'Chunk';
   if (mode === 'staged') {
     return (
       <button className="hunk-button" onClick={() => onAction('unstage')}>
@@ -163,6 +165,7 @@ const HunkView = memo(function HunkView({
         <span className="hunk-section">{hunk.section}</span>
         <span className="hunk-actions">{actions}</span>
       </div>
+      <div className="hunk-lines">
       {hunk.lines.map((line, li) => {
         const isChange = line.type !== 'context';
         const isSelected = !!selected?.has(li);
@@ -189,6 +192,7 @@ const HunkView = memo(function HunkView({
           </div>
         );
       })}
+      </div>
     </div>
   );
 });

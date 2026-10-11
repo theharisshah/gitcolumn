@@ -53,6 +53,7 @@ import { changedFiles } from './changes.ts';
 import { filesApi } from './files.ts';
 import { reflogApi } from './reflog.ts';
 import { undoApi } from './undo.ts';
+import { ignoreApi } from './ignore.ts';
 import type { ApiCtx, HandlerModule } from './ctx.ts';
 import {
   assertHash,
@@ -85,7 +86,7 @@ export interface Host {
 export type Handler = (args: any) => Promise<unknown>;
 
 /** Feature modules (files, reflog, undo, branches, rebase, github) contributing handlers. */
-const HANDLER_MODULES: HandlerModule[] = [filesApi, reflogApi, undoApi];
+const HANDLER_MODULES: HandlerModule[] = [filesApi, reflogApi, undoApi, ignoreApi];
 
 export interface ConflictResult {
   conflicts: boolean;
@@ -335,7 +336,7 @@ export function createApi(host: Host): Record<string, Handler> {
       ignoreWhitespace?: boolean;
       context?: number;
     }): Promise<FileDiff | null> {
-      const opts = ['--no-ext-diff', `-U${Math.max(0, Math.min(context, 1000))}`];
+      const opts = ['--no-ext-diff', `-U${Math.max(0, Math.min(Math.floor(context) || 0, 1_000_000))}`];
       if (ignoreWhitespace) opts.push('-w');
       let raw: string;
       if (file.untracked) {
@@ -426,15 +427,19 @@ export function createApi(host: Host): Record<string, Handler> {
       diff,
       selection,
       action,
+      unidiffZero,
     }: {
       repo: string;
       diff: FileDiff;
       selection: LineSelection;
       action: PatchAction;
+      /** The diff was made without context lines (-U0) */
+      unidiffZero?: boolean;
     }) {
       const patch = buildPatch(diff, selection, action === 'stage' ? 'forward' : 'reverse');
       if (!patch) return;
       const args = ['apply', '--recount', '--whitespace=nowarn'];
+      if (unidiffZero) args.push('--unidiff-zero');
       if (action !== 'discard') args.push('--cached');
       if (action !== 'stage') args.push('--reverse');
       args.push('-');
@@ -469,6 +474,30 @@ export function createApi(host: Host): Record<string, Handler> {
       if (amend && only) args.push('--only');
       if (signoff) args.push('--signoff');
       await git(repo, args, { input: message });
+    },
+
+    /** The commit.template text without comment lines (git ignores templates when the message is passed with -F). */
+    async 'commit.template'({ repo }: { repo: string }): Promise<string | null> {
+      const file = (await git(repo, ['config', '--path', '--get', 'commit.template'], { okCodes: [1] })).trim();
+      if (!file) return null;
+      // --path already expanded "~"; relative paths are relative to the worktree, like git's own lookup.
+      const text = await readText(path.resolve(repo, file));
+      if (!text || text.length > 64 * 1024) return null;
+      const commentChar = (await configGet(repo, 'core.commentChar')) ?? '#';
+      const c = commentChar.length === 1 ? commentChar : '#';
+      const stripped = text
+        .split('\n')
+        .filter((l) => !l.startsWith(c))
+        .join('\n')
+        .trim();
+      return stripped || null;
+    },
+
+    /** Who the next commit will be attributed to (honours GIT_AUTHOR_* and config), or null when unset. */
+    async 'identity.author'({ repo }: { repo: string }): Promise<{ name: string; email: string } | null> {
+      const ident = await git(repo, ['var', 'GIT_AUTHOR_IDENT']).catch(() => '');
+      const m = /^(.*?) <([^>]*)>/.exec(ident.trim());
+      return m && m[1] && m[2] ? { name: m[1], email: m[2] } : null;
     },
 
     async 'checkout'({ repo, branch }: { repo: string; branch: string }) {

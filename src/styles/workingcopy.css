@@ -1,0 +1,164 @@
+/* Working Copy: commit composer, file table, diff toolbar */
+
+.wc-list-pane .composer {
+  border-top: none;
+  border-bottom: 1px solid var(--border);
+}
+.composer-author {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 22px;
+  font-size: 12px;
+}
+.composer-identity {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 1px 6px 1px 1px;
+  border: none;
+  border-radius: 12px;
+  background: none;
+  color: var(--text);
+  font-size: 12px;
+  cursor: pointer;
+}
+.composer-identity:hover {
+  background: var(--bg-hover);
+}
+.composer-identity-name {
+  font-weight: 500;
+  white-space: nowrap;
+}
+.composer-identity-email {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.composer-footer .spacer {
+  flex: 1;
+}
+.composer-hint.muted {
+  color: var(--text-muted);
+}
+
+.file-table-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  height: 24px;
+  padding-left: 34px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-header);
+}
+.sort-header {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  height: 100%;
+  padding: 0 6px 0 0;
+  border: none;
+  background: none;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+}
+.sort-header.status-col {
+  width: 52px;
+}
+.sort-header.active,
+.sort-header:hover {
+  color: var(--text);
+}
+.file-list:focus .file-row.selected svg {
+  color: #fff;
+}
+.folder-row {
+  cursor: default;
+  color: var(--text-muted);
+}
+.folder-row .file-name {
+  color: var(--text);
+}
+.folder-chevron {
+  display: inline-flex;
+  width: 12px;
+  margin-left: -4px;
+  flex: none;
+}
+.folder-count {
+  flex: none;
+  font-size: 11px;
+}
+.segmented-icons button {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 6px;
+}
+
+.diff-toolbar {
+  flex: none;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  min-height: 34px;
+  padding: 4px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-pane);
+  font-size: 12px;
+  min-width: 0;
+}
+.diff-toolbar .spacer {
+  flex: 1;
+}
+.diff-summary {
+  white-space: nowrap;
+}
+.diff-context {
+  width: auto;
+  height: 24px;
+  padding: 0 6px;
+  font-size: 12px;
+}
+.icon-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 24px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: none;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.icon-toggle:hover {
+  background: var(--bg-hover);
+}
+.icon-toggle.active {
+  background: var(--accent-soft);
+  border-color: var(--accent-soft);
+  color: var(--accent);
+}
+
+/* Long lines scroll instead of wrapping; line numbers stay put. */
+.diff.nowrap .hunk-lines {
+  overflow-x: auto;
+}
+.diff.nowrap .diff-line {
+  width: max-content;
+  min-width: 100%;
+}
+.diff.nowrap .diff-content {
+  flex: none;
+  white-space: pre;
+  overflow-wrap: normal;
+}
+.diff.nowrap .diff-gutter {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+}

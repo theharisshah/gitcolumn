@@ -5,6 +5,7 @@ import path from 'node:path';
 import type { Snapshot, UndoResult, UndoSpec, UndoState } from '../shared/types.ts';
 import type { HandlerModule } from './ctx.ts';
 import { git, GitError, gitRaw, hashFiles } from './git.ts';
+import { ignoreFile } from './ignore.ts';
 import { assertHash, assertRef, assertSafe, insideRepo } from './util.ts';
 
 /** What a path held right after the operation: a blob id, null (absent) or '!' (not a regular file). */
@@ -48,7 +49,7 @@ class BlockedError extends Error {}
 
 const KINDS = new Set<UndoSpec['kind']>([
   'head-reset', 'commit', 'index', 'files', 'refs', 'checkout', 'branch-rename',
-  'upstream', 'stash-save', 'stash-apply', 'stash-drop', 'remote-add', 'remote-remove',
+  'upstream', 'stash-save', 'stash-apply', 'stash-drop', 'remote-add', 'remote-remove', 'ignore',
 ]);
 
 // git prints config variable names in lower case, so compare case-insensitively.
@@ -103,6 +104,7 @@ function objectsOf(spec: UndoSpec): string[] {
   if (spec.kind === 'head-reset') ids.push(spec.index);
   else if (spec.kind === 'index') ids.push(spec.tree);
   else if (spec.kind === 'files' || spec.kind === 'stash-apply') ids.push(...snap(spec.snapshot));
+  else if (spec.kind === 'ignore') ids.push(spec.index);
   return ids.filter((x): x is string => !!x);
 }
 
@@ -113,6 +115,7 @@ function validate(spec: UndoSpec) {
   if ((spec.kind === 'files' || spec.kind === 'stash-apply') && !Array.isArray(spec.snapshot?.files ?? [])) throw new Error('Invalid snapshot');
   if (spec.kind === 'refs' && !Array.isArray(spec.updates)) throw new Error('Invalid ref updates');
   if ((spec.kind === 'upstream' || spec.kind === 'remote-remove') && !Array.isArray(spec.config)) throw new Error('Invalid config');
+  if (spec.kind === 'ignore' && (!['gitignore', 'exclude'].includes(spec.file) || typeof spec.after !== 'string')) throw new Error('Invalid ignore spec');
 }
 
 function validEntry(e: unknown): e is Stored {
@@ -266,7 +269,7 @@ export const undoApi: HandlerModule = (ctx) => {
 
   async function guardFor(repo: string, spec: UndoSpec): Promise<Guard | undefined> {
     const guard: Guard = {};
-    if (spec.kind === 'index' || spec.kind === 'files' || spec.kind === 'stash-apply' || (spec.kind === 'head-reset' && spec.index)) {
+    if (spec.kind === 'index' || spec.kind === 'files' || spec.kind === 'stash-apply' || ((spec.kind === 'head-reset' || spec.kind === 'ignore') && spec.index)) {
       guard.index = await writeTree(repo);
     }
     if (spec.kind === 'files' || spec.kind === 'stash-apply') {
@@ -520,6 +523,32 @@ export const undoApi: HandlerModule = (ctx) => {
           const cmds = refs.flatMap(([ref, oid], i) => (/ missing$/.test(lines[i] ?? '') ? [] : [`create ${ref}`, oid]));
           if (cmds.length) await git(repo, ['update-ref', '--stdin', '-z'], { input: cmds.join('\0') + '\0' }).catch(() => undefined);
         }
+        return {};
+      }
+      case 'ignore': {
+        await expect(repo, { head: spec.head });
+        const file = await ignoreFile(repo, spec.file);
+        const current = await fs.readFile(file, 'utf8').catch(() => null);
+        const name = spec.file === 'gitignore' ? '.gitignore' : '.git/info/exclude';
+        if (current !== spec.after && current !== spec.before) {
+          throw new BlockedError(`${name} was changed since then. Edit it by hand, or skip this undo.`);
+        }
+        if (spec.index) {
+          assertHash(spec.index);
+          const tree = await writeTree(repo);
+          if (tree !== spec.index && guard?.index !== undefined && tree !== guard.index) {
+            throw new StaleError('The staging area changed since then, so this can no longer be undone.');
+          }
+        }
+        if (current !== spec.before) {
+          if (spec.before === null) await fs.rm(file, { force: true });
+          else {
+            const tmp = `${file}.${randomUUID()}.gitcolumn-tmp`;
+            await fs.writeFile(tmp, spec.before);
+            await fs.rename(tmp, file);
+          }
+        }
+        if (spec.index) await git(repo, ['read-tree', spec.index]);
         return {};
       }
       default: {

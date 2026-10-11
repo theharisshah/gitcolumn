@@ -1,10 +1,20 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '../lib/api';
-import { draftFromMessage, loadDraft, saveDraft } from '../lib/draft';
+import { draftFromMessage, loadDraft, saveDraft, type Draft } from '../lib/draft';
 import { modKey, plural } from '../lib/format';
 import { useActions } from '../repo/actions';
 import { useRepo } from '../repo/RepoContext';
 import { useUI } from '../ui/UIProvider';
+import { Avatar } from './Avatar';
+
+const SIGNOFF_KEY = 'gitcolumn.signoff';
+const loadSignoff = () => {
+  try {
+    return localStorage.getItem(SIGNOFF_KEY) === '1';
+  } catch {
+    return false;
+  }
+};
 
 export function CommitComposer({ stagedCount, totalCount }: { stagedCount: number; totalCount: number }) {
   const { repo, status } = useRepo();
@@ -13,8 +23,41 @@ export function CommitComposer({ stagedCount, totalCount }: { stagedCount: numbe
   const [subject, setSubject] = useState(() => loadDraft(repo.path).subject);
   const [body, setBody] = useState(() => loadDraft(repo.path).body);
   const [amend, setAmend] = useState(false);
+  const [signoff, setSignoffState] = useState(loadSignoff);
+  const [author, setAuthor] = useState<{ name: string; email: string } | null | undefined>(undefined);
+  /** The commit.template text currently pre-filled (an untouched template is never committed) */
+  const [template, setTemplate] = useState<Draft | null>(null);
   const saved = useRef<{ subject: string; body: string } | null>(null);
   const subjectRef = useRef<HTMLInputElement>(null);
+
+  const setSignoff = (on: boolean) => {
+    setSignoffState(on);
+    try {
+      localStorage.setItem(SIGNOFF_KEY, on ? '1' : '0');
+    } catch {
+      /* storage unavailable */
+    }
+  };
+
+  const loadAuthor = useCallback(() => {
+    api.author(repo.path).then(setAuthor, () => setAuthor(null));
+  }, [repo.path]);
+  useEffect(loadAuthor, [loadAuthor]);
+
+  /** Fill in commit.template when the composer is empty (git itself ignores templates for messages passed with -F). */
+  const prefillTemplate = useCallback(async () => {
+    const text = await api.commitTemplate(repo.path).catch(() => null);
+    if (!text) return setTemplate(null);
+    const draft = draftFromMessage(text);
+    setTemplate(draft);
+    setSubject((s) => s || draft.subject);
+    setBody((b) => b || draft.body);
+  }, [repo.path]);
+  useEffect(() => {
+    const d = loadDraft(repo.path);
+    if (!d.subject && !d.body) void prefillTemplate();
+    else void api.commitTemplate(repo.path).then((t) => setTemplate(t ? draftFromMessage(t) : null), () => undefined);
+  }, [repo.path, prefillTemplate]);
 
   const state = status?.state;
   const inMerge = !!(state?.merging || state?.cherryPicking || state?.reverting);
@@ -75,7 +118,8 @@ export function CommitComposer({ stagedCount, totalCount }: { stagedCount: numbe
     }
   };
 
-  const canCommit = !!subject.trim() && conflicts === 0 && (stagedCount > 0 || amend || inMerge || totalCount > 0);
+  const untouchedTemplate = !!template && subject.trim() === template.subject.trim() && body.trim() === template.body.trim();
+  const canCommit = !!subject.trim() && !untouchedTemplate && conflicts === 0 && (stagedCount > 0 || amend || inMerge || totalCount > 0);
 
   const commit = async () => {
     if (!canCommit) return;
@@ -83,6 +127,7 @@ export function CommitComposer({ stagedCount, totalCount }: { stagedCount: numbe
     if (!id.name || !id.email) {
       ui.toast('info', 'Set your name and email first', 'Git records them as the author of each commit.');
       if (!(await actions.editIdentity())) return;
+      loadAuthor();
     }
     let stageAll = false;
     if (!stagedCount && !amend && !inMerge) {
@@ -95,12 +140,13 @@ export function CommitComposer({ stagedCount, totalCount }: { stagedCount: numbe
       stageAll = true;
     }
     const message = body.trim() ? `${subject.trim()}\n\n${body.trim()}` : subject.trim();
-    const done = await actions.commit(message, { amend, stageAll, undoable: !inMerge });
+    const done = await actions.commit(message, { amend, stageAll, undoable: !inMerge, signoff });
     if (done) {
       setSubject('');
       setBody('');
       setAmend(false);
       saved.current = null;
+      void prefillTemplate();
     }
   };
 
@@ -116,6 +162,30 @@ export function CommitComposer({ stagedCount, totalCount }: { stagedCount: numbe
   if (state?.cherryPicking) label = 'Commit Cherry-Pick';
   return (
     <div className="composer" onKeyDown={onKey}>
+      <div className="composer-author">
+        {author ? (
+          <button
+            className="composer-identity"
+            onClick={async () => (await actions.editIdentity()) && loadAuthor()}
+            title="Commits are recorded with this name and email. Click to change."
+          >
+            <Avatar name={author.name} email={author.email} size={20} />
+            <span className="composer-identity-name">{author.name}</span>
+            <span className="muted composer-identity-email">{author.email}</span>
+          </button>
+        ) : (
+          author === null && (
+            <button className="link-button" onClick={async () => (await actions.editIdentity()) && loadAuthor()}>
+              Set your name and email…
+            </button>
+          )
+        )}
+        <span className="spacer" />
+        <label className="toggle" title="Add a Signed-off-by trailer (git commit --signoff)">
+          <input type="checkbox" checked={signoff} onChange={(e) => setSignoff(e.target.checked)} />
+          Sign Off
+        </label>
+      </div>
       <div className="composer-subject">
         <input
           ref={subjectRef}
@@ -140,11 +210,18 @@ export function CommitComposer({ stagedCount, totalCount }: { stagedCount: numbe
           <input type="checkbox" checked={amend} disabled={!status?.head || inMerge} onChange={(e) => toggleAmend(e.target.checked)} />
           Amend
         </label>
+        <span className="spacer" />
+        {stagedCount > 0 && (
+          <button className="button" onClick={() => actions.unstageAll()} title="Move all staged changes back to unstaged">
+            Unstage All
+          </button>
+        )}
         <button className="button button-primary" disabled={!canCommit} onClick={commit} title={`${modKey}↩`}>
           {label}
         </button>
       </div>
       {conflicts > 0 && <div className="composer-hint">Resolve {plural(conflicts, 'conflict')} before committing.</div>}
+      {untouchedTemplate && conflicts === 0 && <div className="composer-hint muted">Fill in the commit template before committing.</div>}
     </div>
   );
 }

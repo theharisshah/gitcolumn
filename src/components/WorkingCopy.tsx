@@ -1,30 +1,19 @@
-import { AlertTriangle, Check, FolderOpen, Minus, Undo2 } from 'lucide-react';
+import { FolderOpen, Undo2 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { FileDiff, FileStatus, LineSelection, PatchAction } from '../../shared/types';
 import { api } from '../lib/api';
-import { basename, copyText, dirname, modKey, plural } from '../lib/format';
+import { copyText, modKey } from '../lib/format';
+import { useSetting } from '../lib/settings';
 import { useActions } from '../repo/actions';
 import { useRepo } from '../repo/RepoContext';
 import { useUI, type MenuItem } from '../ui/UIProvider';
 import { CommitComposer } from './CommitComposer';
+import { FileList, keyOf, stageState } from './FileList';
 import { ConflictView } from './ConflictView';
+import { DiffToolbar, type DiffSide } from './DiffToolbar';
 import { DiffView } from './DiffView';
 import { Splitter, usePersistentSize } from './Splitter';
 import { StatusBadge, primaryStatus } from './StatusBadge';
-
-type StageState = 'full' | 'partial' | 'none' | 'conflict';
-
-export function stageState(f: FileStatus): StageState {
-  if (f.conflicted) return 'conflict';
-  if (f.untracked) return 'none';
-  const staged = f.index !== '.';
-  const unstaged = f.worktree !== '.';
-  if (staged && unstaged) return 'partial';
-  return staged ? 'full' : 'none';
-}
-
-/** Unique row id: a path can appear twice (staged deletion + untracked file of the same name). */
-const keyOf = (f: FileStatus) => (f.untracked ? `?${f.path}` : f.path);
 
 const pathsOf = (files: FileStatus[]) => files.flatMap((f) => (f.origPath ? [f.path, f.origPath] : [f.path]));
 
@@ -34,8 +23,6 @@ export function WorkingCopy() {
   const actions = useActions();
   const [width, setWidth] = usePersistentSize('wc.list', 380);
   const [selected, setSelected] = useState<string[]>([]);
-  const anchor = useRef<string | null>(null);
-  const listRef = useRef<HTMLDivElement>(null);
 
   const files = useMemo(() => {
     const all = status?.files ?? [];
@@ -57,13 +44,6 @@ export function WorkingCopy() {
   const current = selectedFiles.length === 1 ? selectedFiles[0] : null;
 
   const stagedCount = files.filter((f) => !f.conflicted && f.index !== '.').length;
-  const allState: StageState = !files.length
-    ? 'none'
-    : files.every((f) => stageState(f) === 'full')
-      ? 'full'
-      : stagedCount
-        ? 'partial'
-        : 'none';
 
   const toggleStage = useCallback(
     (targets: FileStatus[]) => {
@@ -75,21 +55,6 @@ export function WorkingCopy() {
     },
     [actions],
   );
-
-  const onRowClick = (e: React.MouseEvent, f: FileStatus) => {
-    if (e.metaKey || e.ctrlKey) {
-      setSelected((sel) => (sel.includes(keyOf(f)) ? sel.filter((p) => p !== keyOf(f)) : [...sel, keyOf(f)]));
-      anchor.current = keyOf(f);
-    } else if (e.shiftKey && anchor.current) {
-      const a = files.findIndex((x) => keyOf(x) === anchor.current);
-      const b = files.findIndex((x) => keyOf(x) === keyOf(f));
-      const [lo, hi] = a < b ? [a, b] : [b, a];
-      setSelected(files.slice(lo, hi + 1).map((x) => keyOf(x)));
-    } else {
-      setSelected([keyOf(f)]);
-      anchor.current = keyOf(f);
-    }
-  };
 
   const fileMenu = (e: React.MouseEvent, f: FileStatus) => {
     const targets = selected.includes(keyOf(f)) ? selectedFiles : [f];
@@ -114,6 +79,7 @@ export function WorkingCopy() {
         items.push({ label: 'Show File History', onClick: () => actions.showFileHistory(single.path) });
         items.push({ label: 'Blame', onClick: () => actions.blame(single.path) });
       }
+      items.push({ label: 'Ignore…', onClick: () => actions.ignore(single.path) });
       items.push({ label: 'Reveal in Finder', icon: <FolderOpen size={14} />, onClick: () => api.reveal(repo.path, single.path).catch((err) => ui.toast('error', 'Could not reveal file', String(err))) });
       items.push({ label: 'Open with Default App', onClick: () => api.openPath(repo.path, single.path).catch((err) => ui.toast('error', 'Could not open file', String(err))) });
       items.push({ label: 'Copy Path', onClick: () => copyText(single.path) });
@@ -121,81 +87,20 @@ export function WorkingCopy() {
     ui.menu(e, items);
   };
 
-  const onKeyDown = (e: React.KeyboardEvent) => {
-    if (!files.length) return;
-    const idx = files.findIndex((f) => keyOf(f) === (anchor.current ?? selected[0]));
-    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
-      e.preventDefault();
-      const next = files[Math.max(0, Math.min(files.length - 1, idx + (e.key === 'ArrowDown' ? 1 : -1)))];
-      setSelected([keyOf(next)]);
-      anchor.current = keyOf(next);
-      listRef.current?.querySelector(`[data-key="${CSS.escape(keyOf(next))}"]`)?.scrollIntoView({ block: 'nearest' });
-    } else if (e.key === ' ') {
-      e.preventDefault();
-      toggleStage(selectedFiles);
-    } else if ((e.key === 'Backspace' || e.key === 'Delete') && (e.metaKey || e.ctrlKey)) {
-      e.preventDefault();
-      actions.discard(selectedFiles);
-    } else if (e.key === 'a' && (e.metaKey || e.ctrlKey)) {
-      e.preventDefault();
-      setSelected(files.map((f) => keyOf(f)));
-    }
-  };
-
   return (
     <div className="working-copy">
       <div className="wc-list-pane" style={{ width }}>
-        <div className="pane-header wc-list-header">
-          <Checkbox
-            state={allState}
-            disabled={!files.length || files.every((f) => f.conflicted)}
-            onClick={() => (allState === 'full' ? actions.unstageAll() : actions.stageAll())}
-            title={allState === 'full' ? 'Unstage all' : 'Stage all'}
-          />
-          <span className="pane-title">
-            {files.length ? plural(files.length, 'changed file') : 'No changes'}
-            {stagedCount > 0 && <span className="muted"> · {stagedCount} staged</span>}
-          </span>
-        </div>
-        <div className="file-list" tabIndex={0} ref={listRef} onKeyDown={onKeyDown}>
-          {files.map((f) => {
-            const st = stageState(f);
-            const isSel = selected.includes(keyOf(f));
-            return (
-              <div
-                key={keyOf(f)}
-                data-key={keyOf(f)}
-                className={`file-row ${isSel ? 'selected' : ''} ${f.conflicted ? 'conflicted' : ''}`}
-                onMouseDown={(e) => {
-                  if (e.button === 0) onRowClick(e, f);
-                }}
-                onContextMenu={(e) => fileMenu(e, f)}
-                onDoubleClick={() => toggleStage([f])}
-              >
-                <Checkbox
-                  state={st}
-                  disabled={f.conflicted}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    toggleStage(isSel ? selectedFiles : [f]);
-                  }}
-                />
-                <StatusBadge status={primaryStatus(f)} />
-                <span className="file-name" title={f.origPath ? `${f.origPath} → ${f.path}` : f.path}>
-                  {basename(f.path)}
-                  <span className="file-dir">{dirname(f.path)}</span>
-                </span>
-              </div>
-            );
-          })}
-          {!files.length && status && (
-            <div className="empty-state small">
-              <Check size={28} strokeWidth={1.5} />
-              <div>Working copy is clean</div>
-            </div>
-          )}
-        </div>
         <CommitComposer stagedCount={stagedCount} totalCount={files.length} />
+        <FileList
+          files={files}
+          selected={selected}
+          onSelect={setSelected}
+          onToggleStage={toggleStage}
+          onStageAll={() => actions.stageAll()}
+          onUnstageAll={() => actions.unstageAll()}
+          onDiscard={(fs) => actions.discard(fs)}
+          onContextMenu={fileMenu}
+        />
       </div>
       <Splitter value={width} onChange={setWidth} min={260} max={700} />
       <div className="wc-diff-pane">
@@ -230,32 +135,8 @@ export function WorkingCopy() {
   );
 }
 
-export function Checkbox({
-  state,
-  onClick,
-  disabled,
-  title,
-}: {
-  state: StageState;
-  onClick: (e: React.MouseEvent) => void;
-  disabled?: boolean;
-  title?: string;
-}) {
-  return (
-    <button
-      type="button"
-      className={`checkbox checkbox-${state}`}
-      onMouseDown={(e) => e.stopPropagation()}
-      onClick={onClick}
-      disabled={disabled}
-      title={title ?? (state === 'full' ? 'Unstage' : 'Stage')}
-      aria-checked={state === 'full' ? true : state === 'partial' ? 'mixed' : false}
-      role="checkbox"
-    >
-      {state === 'full' ? <Check size={11} strokeWidth={3} /> : state === 'partial' ? <Minus size={11} strokeWidth={3} /> : state === 'conflict' ? <AlertTriangle size={10} strokeWidth={2.5} /> : null}
-    </button>
-  );
-}
+/** Which side was shown last, so moving between files keeps the choice. */
+let lastSide: DiffSide = 'unstaged';
 
 function WorkingFileDiff({
   file,
@@ -269,17 +150,26 @@ function WorkingFileDiff({
   const { repo } = useRepo();
   const ui = useUI();
   const actions = useActions();
-  const [ignoreWs, setIgnoreWs] = useState(false);
+  const [ignoreWs, setIgnoreWs] = useSetting('diffIgnoreWhitespace');
+  const [context, setContext] = useSetting('diffContext');
+  const [wrap, setWrap] = useSetting('diffWrap');
   const [diffs, setDiffs] = useState<{ unstaged: FileDiff | null; staged: FileDiff | null } | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [chosen, setChosen] = useState<DiffSide>(lastSide);
   const last = useRef('');
 
   const hasStaged = !file.untracked && file.index !== '.';
   const hasUnstaged = file.untracked || file.worktree !== '.';
+  // Fall back to the side that has changes.
+  const side: DiffSide = chosen === 'staged' ? (hasStaged ? 'staged' : 'unstaged') : hasUnstaged ? 'unstaged' : 'staged';
+  const chooseSide = (s: DiffSide) => {
+    lastSide = s;
+    setChosen(s);
+  };
 
   const load = useCallback(async () => {
     try {
-      const opts = { ignoreWhitespace: ignoreWs };
+      const opts = { ignoreWhitespace: ignoreWs, context };
       const [unstaged, staged] = await Promise.all([
         hasUnstaged ? api.workingDiff(repo.path, file, false, opts) : null,
         hasStaged ? api.workingDiff(repo.path, file, true, opts) : null,
@@ -292,7 +182,7 @@ function WorkingFileDiff({
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
-  }, [repo.path, file, hasStaged, hasUnstaged, ignoreWs]);
+  }, [repo.path, file, hasStaged, hasUnstaged, ignoreWs, context]);
 
   useEffect(() => {
     load();
@@ -301,13 +191,13 @@ function WorkingFileDiff({
 
   const apply = (diff: FileDiff) => (selection: LineSelection, action: PatchAction) => {
     if (ignoreWs) {
-      ui.toast('info', 'Turn off "Ignore whitespace" to stage or discard individual hunks');
+      ui.toast('info', 'Turn off "Ignore whitespace" to stage or discard individual chunks');
       return;
     }
-    actions.applyPatch(diff, selection, action);
+    actions.applyPatch(diff, selection, action, context === 0);
   };
 
-  const both = hasStaged && hasUnstaged;
+  const diff = diffs ? (side === 'staged' ? diffs.staged : diffs.unstaged) : null;
   return (
     <div className="diff-pane">
       <div className="pane-header diff-pane-header">
@@ -316,10 +206,6 @@ function WorkingFileDiff({
           {file.origPath && <span className="muted">{file.origPath} → </span>}
           {file.path}
         </span>
-        <label className="toggle" title="Ignore whitespace changes">
-          <input type="checkbox" checked={ignoreWs} onChange={(e) => setIgnoreWs(e.target.checked)} />
-          Ignore whitespace
-        </label>
         {hasUnstaged && (
           <button className="button button-small" onClick={() => actions.stage(pathsOf([file]))}>
             Stage File
@@ -339,31 +225,40 @@ function WorkingFileDiff({
           Discard
         </button>
       </div>
+      <DiffToolbar
+        side={side}
+        onSide={chooseSide}
+        hasStaged={hasStaged}
+        hasUnstaged={hasUnstaged}
+        diff={diffs ? diff : undefined}
+        context={context}
+        onContext={setContext}
+        wrap={wrap}
+        onWrap={setWrap}
+        ignoreWhitespace={ignoreWs}
+        onIgnoreWhitespace={setIgnoreWs}
+      />
       <div className="diff-scroll">
         {error && <div className="diff-note error-text">{error}</div>}
-        {diffs?.unstaged && (
-          <>
-            {both && <div className="diff-section-title">Unstaged changes</div>}
-            <DiffView
-              diff={diffs.unstaged}
-              mode={file.untracked ? 'readonly' : 'unstaged'}
-              onApply={apply(diffs.unstaged)}
-              images={{ before: { revs: [':'], path: file.path }, after: { revs: [null], path: file.path } }}
-            />
-          </>
+        {diff && side === 'unstaged' && (
+          <DiffView
+            diff={diff}
+            mode={file.untracked ? 'readonly' : 'unstaged'}
+            onApply={apply(diff)}
+            wrap={wrap}
+            images={{ before: { revs: [':'], path: file.path }, after: { revs: [null], path: file.path } }}
+          />
         )}
-        {diffs?.staged && (
-          <>
-            {both && <div className="diff-section-title staged">Staged changes</div>}
-            <DiffView
-              diff={diffs.staged}
-              mode="staged"
-              onApply={apply(diffs.staged)}
-              images={{ before: { revs: ['HEAD'], path: file.origPath ?? file.path }, after: { revs: [':'], path: file.path } }}
-            />
-          </>
+        {diff && side === 'staged' && (
+          <DiffView
+            diff={diff}
+            mode="staged"
+            onApply={apply(diff)}
+            wrap={wrap}
+            images={{ before: { revs: ['HEAD'], path: file.origPath ?? file.path }, after: { revs: [':'], path: file.path } }}
+          />
         )}
-        {diffs && !diffs.staged && !diffs.unstaged && !error && <div className="diff-note">No textual changes.</div>}
+        {diffs && !diff && !error && <div className="diff-note">No textual changes.</div>}
       </div>
     </div>
   );
