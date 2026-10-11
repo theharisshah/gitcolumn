@@ -24,7 +24,7 @@ export function CommitComposer({ stagedCount, totalCount }: { stagedCount: numbe
   const [body, setBody] = useState(() => loadDraft(repo.path).body);
   const [amend, setAmend] = useState(false);
   const [signoff, setSignoffState] = useState(loadSignoff);
-  const [author, setAuthor] = useState<{ name: string; email: string } | null | undefined>(undefined);
+  const [author, setAuthor] = useState<{ name: string; email: string; configured: boolean } | null | undefined>(undefined);
   /** The commit.template text currently pre-filled (an untouched template is never committed) */
   const [template, setTemplate] = useState<Draft | null>(null);
   const saved = useRef<{ subject: string; body: string } | null>(null);
@@ -44,26 +44,43 @@ export function CommitComposer({ stagedCount, totalCount }: { stagedCount: numbe
   }, [repo.path]);
   useEffect(loadAuthor, [loadAuthor]);
 
+  const state = status?.state;
+  const inMerge = !!(state?.merging || state?.cherryPicking || state?.reverting);
+  const conflicts = status?.files.filter((f) => f.conflicted).length ?? 0;
+  const inMergeRef = useRef(inMerge);
+  inMergeRef.current = inMerge;
+  const templateRef = useRef<Draft | null>(null);
+  const isTemplate = (text: string, part: keyof Draft) => !!templateRef.current && text.trim() === templateRef.current[part].trim();
+
   /** Fill in commit.template when the composer is empty (git itself ignores templates for messages passed with -F). */
   const prefillTemplate = useCallback(async () => {
     const text = await api.commitTemplate(repo.path).catch(() => null);
-    if (!text) return setTemplate(null);
-    const draft = draftFromMessage(text);
+    const draft = text ? draftFromMessage(text) : null;
+    templateRef.current = draft;
     setTemplate(draft);
+    // A merge / cherry-pick brings its own message.
+    if (!draft || inMergeRef.current) return;
     setSubject((s) => s || draft.subject);
     setBody((b) => b || draft.body);
   }, [repo.path]);
   useEffect(() => {
     const d = loadDraft(repo.path);
     if (!d.subject && !d.body) void prefillTemplate();
-    else void api.commitTemplate(repo.path).then((t) => setTemplate(t ? draftFromMessage(t) : null), () => undefined);
+    else
+      void api.commitTemplate(repo.path).then(
+        (t) => {
+          templateRef.current = t ? draftFromMessage(t) : null;
+          setTemplate(templateRef.current);
+        },
+        () => undefined,
+      );
   }, [repo.path, prefillTemplate]);
 
-  const state = status?.state;
-  const inMerge = !!(state?.merging || state?.cherryPicking || state?.reverting);
-  const conflicts = status?.files.filter((f) => f.conflicted).length ?? 0;
-
-  useEffect(() => saveDraft(repo.path, { subject, body }), [repo.path, subject, body]);
+  // The untouched template isn't a draft: keeping it would hide a restored message or an updated template.
+  useEffect(
+    () => saveDraft(repo.path, isTemplate(subject, 'subject') && isTemplate(body, 'body') ? { subject: '', body: '' } : { subject, body }),
+    [repo.path, subject, body, template],
+  );
 
   // Pre-fill the merge / cherry-pick message.
   // Once the operation ends (committed elsewhere or aborted), drop the pre-filled text if it's untouched.
@@ -74,8 +91,9 @@ export function CommitComposer({ stagedCount, totalCount }: { stagedCount: numbe
       const [first, ...rest] = mergeMessage.split('\n');
       const prefill = { subject: first, body: rest.join('\n').trim() };
       lastMerge.current = prefill;
-      setSubject((s) => s || prefill.subject);
-      setBody((b) => b || prefill.body);
+      // The merge message replaces an empty composer or the untouched template.
+      setSubject((s) => (!s || isTemplate(s, 'subject') ? prefill.subject : s));
+      setBody((b) => (!b || isTemplate(b, 'body') ? prefill.body : b));
     } else if (lastMerge.current) {
       const prefill = lastMerge.current;
       lastMerge.current = null;
@@ -123,8 +141,10 @@ export function CommitComposer({ stagedCount, totalCount }: { stagedCount: numbe
 
   const commit = async () => {
     if (!canCommit) return;
-    const id = await api.identity(repo.path).catch(() => ({ name: 'x', email: 'x' }));
-    if (!id.name || !id.email) {
+    // Same check as git's: an identity guessed from the system isn't configured.
+    const id = await api.author(repo.path).catch(() => null);
+    setAuthor(id);
+    if (!id?.configured) {
       ui.toast('info', 'Set your name and email first', 'Git records them as the author of each commit.');
       if (!(await actions.editIdentity())) return;
       loadAuthor();
@@ -172,6 +192,7 @@ export function CommitComposer({ stagedCount, totalCount }: { stagedCount: numbe
             <Avatar name={author.name} email={author.email} size={20} />
             <span className="composer-identity-name">{author.name}</span>
             <span className="muted composer-identity-email">{author.email}</span>
+            {!author.configured && <span className="composer-identity-warning">Not set — click to set</span>}
           </button>
         ) : (
           author === null && (

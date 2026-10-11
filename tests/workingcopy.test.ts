@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { after, before, describe, test } from 'node:test';
@@ -49,8 +49,83 @@ describe('commit composer backend', () => {
     assert.equal(await call('commit.template', { repo }), null);
   });
 
-  test('author identity comes from git var', async () => {
-    assert.deepEqual(await call('identity.author', { repo }), { name: 'Test User', email: 'test@example.com' });
+  test('author identity comes from git var, and says whether it is configured', async () => {
+    assert.deepEqual(await call('identity.author', { repo }), { name: 'Test User', email: 'test@example.com', configured: true });
+  });
+
+  test('template comments honour core.commentString and CRLF templates', async () => {
+    sh(repo, 'config', '--unset', 'core.commentChar');
+    sh(repo, 'config', 'core.commentString', '//');
+    writeFileSync(path.join(repo, '.gitmessage'), '// guide\r\nfix: \r\n# not a comment\r\n');
+    sh(repo, 'config', 'commit.template', '.gitmessage');
+    assert.equal(await call('commit.template', { repo }), 'fix: \n# not a comment');
+    sh(repo, 'config', '--unset', 'core.commentString');
+    sh(repo, 'config', '--unset', 'commit.template');
+  });
+});
+
+describe('diffs that can be staged ignore diff settings', () => {
+  let repo: string;
+  before(() => {
+    repo = newRepo();
+    writeFileSync(path.join(repo, 'top.txt'), 'a\nb\nc\n');
+    mkdirSync(path.join(repo, 'src'));
+    writeFileSync(path.join(repo, 'src', 'x.cfg'), '# h1\n# h2\nalpha\nbeta\n');
+    writeFileSync(path.join(repo, '.gitattributes'), '*.cfg diff=nohash\n');
+    sh(repo, 'add', '-A');
+    sh(repo, 'commit', '-q', '-m', 'init');
+  });
+  after(() => rmSync(repo, { recursive: true, force: true }));
+  const stageFirstHunk = async (p: string) => {
+    const file: FileStatus = { path: p, index: '.', worktree: 'M' };
+    const diff = await call<FileDiff>('diff.working', { repo, file, staged: false, context: 0 });
+    await call('patch.apply', { repo, diff, selection: { 0: 'all' }, action: 'stage', unidiffZero: true });
+    return execFileSync('git', ['cat-file', 'blob', `:${p}`], { cwd: repo, encoding: 'utf8' });
+  };
+
+  test('noprefix, mnemonic prefixes and forced colour', async () => {
+    sh(repo, 'config', 'diff.noprefix', 'true');
+    sh(repo, 'config', 'diff.mnemonicPrefix', 'true');
+    sh(repo, 'config', 'color.ui', 'always');
+    writeFileSync(path.join(repo, 'top.txt'), 'a\nB\nc\n');
+    assert.equal(await stageFirstHunk('top.txt'), 'a\nB\nc\n');
+    for (const k of ['diff.noprefix', 'diff.mnemonicPrefix', 'color.ui']) sh(repo, 'config', '--unset', k);
+  });
+
+  test('textconv drivers are not applied to stageable diffs', async () => {
+    sh(repo, 'config', 'diff.nohash.textconv', "grep -v '^#'");
+    writeFileSync(path.join(repo, 'src', 'x.cfg'), '# h1\n# h2\nalpha\nbeta\nNEW\n');
+    assert.equal(await stageFirstHunk('src/x.cfg'), '# h1\n# h2\nalpha\nbeta\nNEW\n');
+  });
+});
+
+describe('unstage all during a merge', () => {
+  test('keeps the merge (and its conflicts) going', async () => {
+    const repo = newRepo();
+    try {
+      writeFileSync(path.join(repo, 'c.txt'), 'base\n');
+      writeFileSync(path.join(repo, 'r.txt'), 'base\n');
+      sh(repo, 'add', '-A');
+      sh(repo, 'commit', '-q', '-m', 'base');
+      sh(repo, 'switch', '-q', '-c', 'other');
+      writeFileSync(path.join(repo, 'c.txt'), 'theirs\n');
+      writeFileSync(path.join(repo, 'r.txt'), 'theirs\n');
+      sh(repo, 'commit', '-qam', 'theirs');
+      sh(repo, 'switch', '-q', 'main');
+      writeFileSync(path.join(repo, 'c.txt'), 'ours\n');
+      sh(repo, 'commit', '-qam', 'ours');
+      try {
+        sh(repo, 'merge', '-q', 'other');
+      } catch {
+        /* conflict expected */
+      }
+      await call('unstageAll', { repo });
+      assert.ok(existsSync(path.join(repo, '.git', 'MERGE_HEAD')), 'still merging');
+      assert.match(sh(repo, 'status', '--porcelain'), /^UU c\.txt$/m);
+      assert.match(sh(repo, 'status', '--porcelain'), /^ M r\.txt$/m, 'the resolved file was unstaged');
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
   });
 });
 
@@ -99,23 +174,35 @@ describe('line staging without context (-U0)', () => {
       const at = pick(out.length + 1);
       const kind = pick(3);
       if (kind === 0 && out.length > 1) out.splice(Math.min(at, out.length - 1), 1 + pick(2));
-      else if (kind === 1) out.splice(at, 0, ...Array.from({ length: 1 + pick(3) }, (_, i) => `new ${e}.${i} ${pick(1000)}`));
+      // Copies of neighbouring lines and trailing spaces make hunk placement ambiguous; that's the point.
+      else if (kind === 1)
+        out.splice(at, 0, ...Array.from({ length: 1 + pick(3) }, (_, i) => (rand() < 0.35 && out.length ? out[Math.min(at, out.length - 1)] + (rand() < 0.3 ? ' ' : '') : `new ${e}.${i} ${pick(1000)}`)));
       else if (out.length) out[Math.min(at, out.length - 1)] = `changed ${e} ${pick(1000)}`;
     }
     return out;
   }
 
-  test('matches staging with context for random edits and selections', async () => {
+  /** What staging (forward) or unstaging/discarding (reverse) the chosen lines must produce, from a whole-file diff. */
+  function expected(whole: FileDiff, chosen: Set<string>, forward: boolean): string {
+    const lines = whole.hunks.flatMap((h) => h.lines);
+    const kept = lines.filter((l) =>
+      l.type === 'context' ? true : l.type === 'del' ? chosen.has(lineKey(l)) !== forward : chosen.has(lineKey(l)) === forward,
+    );
+    if (!kept.length) return '';
+    return kept.map((l) => l.content).join('\n') + (kept[kept.length - 1].noNewline ? '' : '\n');
+  }
+
+  test('random edits and selections give exactly the expected result, with and without context', async () => {
     const abs = path.join(repo, file);
-    const indexBlob = () => sh(repo, 'rev-parse', `:${file}`).trim();
-    const results: string[] = [];
-    for (let iter = 0; iter < (stressIters || 40); iter++) {
-      const base = Array.from({ length: 12 + pick(20) }, (_, i) => `line ${i + 1}`);
-      writeFileSync(abs, base.join('\n') + '\n');
+    const indexText = () => execFileSync('git', ['cat-file', 'blob', `:${file}`], { cwd: repo, encoding: 'utf8' });
+    let checks = 0;
+    for (let iter = 0; iter < (stressIters || 60); iter++) {
+      const base = Array.from({ length: 6 + pick(20) }, (_, i) => `line ${i + 1}`);
+      // Files with and without a final newline on either side.
+      writeFileSync(abs, base.join('\n') + (rand() < 0.25 ? '' : '\n'));
       sh(repo, 'add', file);
       sh(repo, 'commit', '-q', '--allow-empty', '-m', `base ${iter}`);
-      const edited = randomEdit(base);
-      const modified = edited.join('\n') + (rand() < 0.15 ? '' : '\n');
+      const modified = randomEdit(base).join('\n') + (rand() < 0.25 ? '' : '\n');
       writeFileSync(abs, modified);
 
       for (const action of ['stage', 'unstage', 'discard'] as PatchAction[]) {
@@ -126,33 +213,82 @@ describe('line staging without context (-U0)', () => {
           if (staged) sh(repo, 'add', file);
         };
         prepare();
-        const ref = await diffAt(3, staged);
-        if (!ref) continue;
-        const changes = ref.hunks.flatMap((h) => h.lines.filter((l) => l.type !== 'context').map(lineKey));
+        const whole = await diffAt(1_000_000, staged);
+        if (!whole || whole.hunks.length !== 1) continue;
+        const changes = whole.hunks[0].lines.filter((l) => l.type !== 'context').map(lineKey);
         const chosen = new Set(changes.filter(() => rand() < 0.5));
         if (!chosen.size) chosen.add(changes[pick(changes.length)]);
-        const read = action === 'discard' ? () => readFileSync(abs, 'utf8') : indexBlob;
-
-        const withContext = await outcome(() => call('patch.apply', { repo, diff: ref, selection: selectionFor(ref, chosen), action }), read);
-        prepare();
-        const zero = await diffAt(0, staged);
-        const withoutContext = await outcome(
-          () => call('patch.apply', { repo, diff: zero, selection: selectionFor(zero, chosen), action, unidiffZero: true }),
-          read,
-        );
-        assert.ok(!withContext.startsWith('ERROR'), `reference failed: iter ${iter} ${action}: ${withContext}`);
-        assert.equal(withoutContext, withContext, `iter ${iter} ${action} chosen=${[...chosen].join(',')}\n${modified}`);
-        results.push(action);
+        const want = expected(whole, chosen, action === 'stage');
+        const read = action === 'discard' ? () => readFileSync(abs, 'utf8') : indexText;
+        for (const context of [3, 1, 0]) {
+          prepare();
+          const diff = await diffAt(context, staged);
+          const got = await outcome(
+            () => call('patch.apply', { repo, diff, selection: selectionFor(diff, chosen), action, unidiffZero: context === 0 }),
+            read,
+          );
+          assert.equal(got, want, `iter ${iter} ${action} -U${context} chosen=${[...chosen].join(',')}\nmodified=${JSON.stringify(modified)}`);
+          checks++;
+        }
       }
       sh(repo, 'reset', '-q', '--hard');
     }
-    assert.ok(results.length >= (stressIters || 40) * 2.5, `ran ${results.length} comparisons`);
+    assert.ok(checks >= (stressIters || 60) * 6, `ran ${checks} checks`);
+  });
+
+  test('zero-context discard next to an identical incomplete last line changes the right line', async () => {
+    const abs = path.join(repo, file);
+    writeFileSync(abs, 'l0\nl1\n');
+    sh(repo, 'add', file);
+    sh(repo, 'commit', '-q', '-m', 'dup');
+    writeFileSync(abs, 'l0\nl0\nl1\nl1');
+    const diff = await diffAt(0, false);
+    const h = diff.hunks.findIndex((x) => x.lines.some((l) => l.type === 'add' && l.newNo === 4));
+    const li = diff.hunks[h].lines.findIndex((l) => l.type === 'add' && l.newNo === 4);
+    await call('patch.apply', { repo, diff, selection: { [h]: [li] }, action: 'discard', unidiffZero: true });
+    assert.equal(readFileSync(abs, 'utf8'), 'l0\nl0\nl1\n');
+    sh(repo, 'reset', '-q', '--hard');
+  });
+
+  test('a zero-context selection made on a stale diff is refused', async () => {
+    const abs = path.join(repo, file);
+    writeFileSync(abs, 'a\nb\n');
+    sh(repo, 'add', file);
+    sh(repo, 'commit', '-q', '-m', 'stale');
+    writeFileSync(abs, 'a\nB\n');
+    const diff = await diffAt(0, false);
+    writeFileSync(abs, 'a\nC\n');
+    await assert.rejects(call('patch.apply', { repo, diff, selection: { 0: 'all' }, action: 'stage', unidiffZero: true }), /changed since/);
+    sh(repo, 'reset', '-q', '--hard');
+  });
+
+  test('staging only lines added after a last line without a newline keeps the lines apart', async () => {
+    const abs = path.join(repo, file);
+    writeFileSync(abs, 'one\ntwo\nlast');
+    sh(repo, 'add', file);
+    sh(repo, 'commit', '-q', '-m', 'no newline');
+    writeFileSync(abs, 'one\ntwo\nlast\nnew 1\nnew 2\n');
+    for (const context of [3, 0]) {
+      sh(repo, 'reset', '-q');
+      const diff = await diffAt(context, false);
+      const h = diff.hunks.findIndex((x) => x.lines.some((l) => l.content === 'new 1'));
+      const li = diff.hunks[h].lines.findIndex((l) => l.content === 'new 1');
+      await call('patch.apply', { repo, diff, selection: { [h]: [li] }, action: 'stage', unidiffZero: context === 0 });
+      assert.equal(execFileSync('git', ['cat-file', 'blob', `:${file}`], { cwd: repo, encoding: 'utf8' }), 'one\ntwo\nlast\nnew 1\n');
+    }
+    sh(repo, 'reset', '-q', '--hard');
   });
 });
 
 describe('pathTree', () => {
   const files = ['README.md', 'src/components/A.tsx', 'src/components/B.tsx', 'src/lib/x.ts', 'docs/guide/intro.md', 'z.txt'];
   const tree = buildPathTree(files, (f) => f);
+
+  test('an untracked nested repository ("dir/") is an entry, not a folder', () => {
+    const t = buildPathTree(['nested/', 'a/b.txt'], (f) => f);
+    assert.deepEqual(t.files, ['nested/']);
+    assert.deepEqual(t.dirs.map((d) => d.name), ['a']);
+  });
 
   test('compacts single-child folders and keeps root files', () => {
     assert.deepEqual(tree.files, ['README.md', 'z.txt']);

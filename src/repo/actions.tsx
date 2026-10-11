@@ -867,7 +867,8 @@ export function useActions() {
           confirmLabel: 'Ignore',
         });
         if (!v) return;
-        const pattern = String(v.pattern).trim();
+        // Not a plain trim: an escaped trailing space ("name\\ ") is part of the pattern.
+        const pattern = String(v.pattern).replace(/^\s+/, '').replace(/(?<!\\)\s+$/, '');
         const untrack = info.tracked && !!v.untrack ? [filePath] : [];
         return run('Ignoring…', () => api.ignoreAdd(path, [pattern], v.target === 'exclude' ? 'exclude' : 'gitignore', untrack), {
           success: (r) => (r.before === r.after && !untrack.length ? `“${pattern}” was already ignored` : `Ignored ${pattern}`),

@@ -36,6 +36,10 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.composer-identity-warning {
+  color: var(--warning);
+  white-space: nowrap;
+}
 .composer-footer .spacer {
   flex: 1;
 }
@@ -87,6 +91,13 @@
   width: 12px;
   margin-left: -4px;
   flex: none;
+}
+.folder-conflict {
+  flex: none;
+  color: var(--danger);
+}
+.folder-row.conflicted .file-name {
+  color: var(--danger);
 }
 .folder-count {
   flex: none;
@@ -148,7 +159,8 @@
 .diff.nowrap .hunk-lines {
   overflow-x: auto;
 }
-.diff.nowrap .diff-line {
+/* Every line as wide as the widest, so backgrounds and the sticky gutter span the whole scroll width. */
+.diff.nowrap .hunk-lines-inner {
   width: max-content;
   min-width: 100%;
 }

@@ -124,7 +124,7 @@ export const api = {
   commit: (repo: string, message: string, amend?: boolean, opts: { signoff?: boolean; only?: boolean } = {}) =>
     call('commit', { repo, message, amend, ...opts }),
   commitTemplate: (repo: string) => call<string | null>('commit.template', { repo }),
-  author: (repo: string) => call<{ name: string; email: string } | null>('identity.author', { repo }),
+  author: (repo: string) => call<{ name: string; email: string; configured: boolean } | null>('identity.author', { repo }),
   checkout: (repo: string, branch: string) => call('checkout', { repo, branch }),
   checkoutDetached: (repo: string, ref: string) => call('checkout.detached', { repo, ref }),
   checkoutRemote: (repo: string, remoteBranch: string, localName: string) =>

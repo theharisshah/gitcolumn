@@ -608,9 +608,11 @@ export const undoApi: HandlerModule = (ctx) => {
         if (current !== spec.before) {
           if (spec.before === null) await fs.rm(file, { force: true });
           else {
-            const tmp = `${file}.${randomUUID()}.gitcolumn-tmp`;
+            // Through a symlinked info/exclude (or .gitignore) to its target, keeping the link.
+            const real = await fs.realpath(file).catch(() => file);
+            const tmp = path.join(path.dirname(real), `.gitcolumn-${randomUUID().slice(0, 8)}.tmp`);
             await fs.writeFile(tmp, spec.before);
-            await fs.rename(tmp, file);
+            await fs.rename(tmp, real);
           }
         }
         if (spec.index) await git(repo, ['read-tree', spec.index]);

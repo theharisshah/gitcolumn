@@ -27,7 +27,8 @@ export function buildPathTree<T>(items: T[], pathOf: (item: T) => string): DirNo
     return node;
   };
   for (const item of items) {
-    const p = pathOf(item);
+    // An untracked nested repository is reported as "dir/": it's an entry of its parent, not a folder to open.
+    const p = pathOf(item).replace(/\/+$/, '');
     const slash = p.lastIndexOf('/');
     dirFor(slash < 0 ? '' : p.slice(0, slash)).files.push(item);
   }

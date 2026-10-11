@@ -171,6 +171,34 @@ export function createApi(host: Host): Record<string, Handler> {
     }
   }
 
+  /** Diff output the parser and git apply can rely on, whatever the user's diff.* / color.* settings. */
+  const DIFF_FLAGS = ['--no-color', '--no-ext-diff', '--src-prefix=a/', '--dst-prefix=b/'];
+
+  /** The same selected lines (by line number and content) in a fresh diff of the file with 3 lines of context. */
+  async function withContext(repo: string, diff: FileDiff, selection: LineSelection, action: PatchAction) {
+    const key = (l: { type: string; oldNo?: number; newNo?: number }) => `${l.type}:${l.type === 'add' ? l.newNo : l.oldNo}`;
+    const wanted = new Map<string, string>();
+    diff.hunks.forEach((h, hi) => {
+      const sel = selection[hi];
+      if (!sel) return;
+      h.lines.forEach((l, li) => {
+        if (l.type !== 'context' && (sel === 'all' || sel.includes(li))) wanted.set(key(l), l.content);
+      });
+    });
+    const staged = action === 'unstage';
+    const file: FileStatus = { path: diff.newPath || diff.oldPath, index: staged ? 'M' : '.', worktree: staged ? '.' : 'M' };
+    const fresh = await api['diff.working']({ repo, file, staged, context: 3 }) as FileDiff | null;
+    const mapped: LineSelection = {};
+    let found = 0;
+    fresh?.hunks.forEach((h, hi) => {
+      const idx = h.lines.flatMap((l, li) => (l.type !== 'context' && wanted.get(key(l)) === l.content ? [li] : []));
+      found += idx.length;
+      if (idx.length) mapped[hi] = idx;
+    });
+    if (!fresh || found !== wanted.size) throw new Error('The file changed since its changes were shown. Try again.');
+    return { diff: fresh, selection: mapped };
+  }
+
   function pathspecInput(paths: string[]): string {
     return paths.join('\0') + '\0';
   }
@@ -310,9 +338,9 @@ export function createApi(host: Host): Record<string, Handler> {
       let args: string[];
       if (parent) {
         assertSafe(parent);
-        args = ['diff', '--no-ext-diff', '-M', parent, hash];
+        args = ['diff', ...DIFF_FLAGS, '-M', parent, hash];
       } else {
-        args = ['diff-tree', '-p', '-r', '--root', '--no-commit-id', '--no-ext-diff', '-M', hash];
+        args = ['diff-tree', '-p', '-r', '--root', '--no-commit-id', ...DIFF_FLAGS, '-M', hash];
       }
       if (paths?.length) args.push('--', ...paths);
       return parseDiff(await git(repo, args, { maxBytes: MAX_DIFF_BYTES }));
@@ -336,7 +364,8 @@ export function createApi(host: Host): Record<string, Handler> {
       ignoreWhitespace?: boolean;
       context?: number;
     }): Promise<FileDiff | null> {
-      const opts = ['--no-ext-diff', `-U${Math.max(0, Math.min(Math.floor(context) || 0, 1_000_000))}`];
+      // --no-textconv: these hunks are applied to the real file contents when staging lines.
+      const opts = [...DIFF_FLAGS, '--no-textconv', `-U${Math.max(0, Math.min(Math.floor(context) || 0, 1_000_000))}`];
       if (ignoreWhitespace) opts.push('-w');
       let raw: string;
       if (file.untracked) {
@@ -393,6 +422,16 @@ export function createApi(host: Host): Record<string, Handler> {
     },
 
     async unstageAll({ repo }: { repo: string }) {
+      const state = await repoState(repo);
+      if (state.merging || state.cherryPicking || state.reverting || state.rebasing) {
+        // `git reset` would also end the merge (or lose the conflict stages): unstage only resolved paths.
+        const staged = (await getStatus(repo)).files.filter((f) => !f.conflicted && f.index !== '.');
+        const paths = staged.flatMap((f) => (f.origPath ? [f.path, f.origPath] : [f.path]));
+        if (paths.length) {
+          await git(repo, ['restore', '--staged', '--pathspec-from-file=-', '--pathspec-file-nul'], { input: pathspecInput(paths) });
+        }
+        return;
+      }
       if (await headExists(repo)) await git(repo, ['reset', '-q']);
       else await git(repo, ['rm', '--cached', '-r', '-q', '.']);
     },
@@ -436,10 +475,14 @@ export function createApi(host: Host): Record<string, Handler> {
       /** The diff was made without context lines (-U0) */
       unidiffZero?: boolean;
     }) {
+      if (unidiffZero) {
+        // Hunks without context are placed by line numbers alone, and git's --unidiff-zero matching is
+        // ambiguous near an incomplete last line. Re-select the same lines in a fresh -U3 diff instead.
+        ({ diff, selection } = await withContext(repo, diff, selection, action));
+      }
       const patch = buildPatch(diff, selection, action === 'stage' ? 'forward' : 'reverse');
       if (!patch) return;
       const args = ['apply', '--recount', '--whitespace=nowarn'];
-      if (unidiffZero) args.push('--unidiff-zero');
       if (action !== 'discard') args.push('--cached');
       if (action !== 'stage') args.push('--reverse');
       args.push('-');
@@ -483,9 +526,11 @@ export function createApi(host: Host): Record<string, Handler> {
       // --path already expanded "~"; relative paths are relative to the worktree, like git's own lookup.
       const text = await readText(path.resolve(repo, file));
       if (!text || text.length > 64 * 1024) return null;
-      const commentChar = (await configGet(repo, 'core.commentChar')) ?? '#';
-      const c = commentChar.length === 1 ? commentChar : '#';
+      // core.commentString (git 2.45+) or core.commentChar, which may be several characters; "auto" means "#".
+      const configured = (await configGet(repo, 'core.commentString')) ?? (await configGet(repo, 'core.commentChar')) ?? '#';
+      const c = !configured || configured === 'auto' ? '#' : configured;
       const stripped = text
+        .replace(/\r\n/g, '\n')
         .split('\n')
         .filter((l) => !l.startsWith(c))
         .join('\n')
@@ -494,10 +539,14 @@ export function createApi(host: Host): Record<string, Handler> {
     },
 
     /** Who the next commit will be attributed to (honours GIT_AUTHOR_* and config), or null when unset. */
-    async 'identity.author'({ repo }: { repo: string }): Promise<{ name: string; email: string } | null> {
+    async 'identity.author'({ repo }: { repo: string }): Promise<{ name: string; email: string; configured: boolean } | null> {
       const ident = await git(repo, ['var', 'GIT_AUTHOR_IDENT']).catch(() => '');
-      const m = /^(.*?) <([^>]*)>/.exec(ident.trim());
-      return m && m[1] && m[2] ? { name: m[1], email: m[2] } : null;
+      const m = /^(.*) <([^>]*)> \d+ [+-]\d{4}$/.exec(ident.trim()) ?? /^(.*?) <([^>]*)>/.exec(ident.trim());
+      if (!m || !m[1] || !m[2]) return null;
+      // Without user.name/user.email git may guess an identity from the system; the composer asks to set one.
+      const [name, email] = await Promise.all([configGet(repo, 'user.name'), configGet(repo, 'user.email')]);
+      const env = process.env.GIT_AUTHOR_NAME && process.env.GIT_AUTHOR_EMAIL;
+      return { name: m[1], email: m[2], configured: !!env || (!!name && !!email) };
     },
 
     async 'checkout'({ repo, branch }: { repo: string; branch: string }) {
@@ -707,7 +756,7 @@ export function createApi(host: Host): Record<string, Handler> {
 
     async 'stash.diff'({ repo, ref }: { repo: string; ref: string }): Promise<FileDiff[]> {
       assertStash(ref);
-      const raw = await git(repo, ['stash', 'show', '-p', '-M', '--include-untracked', '--no-ext-diff', ref], {
+      const raw = await git(repo, ['stash', 'show', '-p', '-M', '--include-untracked', ...DIFF_FLAGS, ref], {
         maxBytes: MAX_DIFF_BYTES,
       });
       return parseDiff(raw);

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { after, beforeEach, describe, test } from 'node:test';
@@ -32,6 +32,8 @@ describe('ignore patterns', () => {
     assert.equal(appendPatterns('node_modules', ['*.log']), 'node_modules\n*.log\n');
     assert.equal(appendPatterns('a\r\nb\r\n', ['c']), 'a\r\nb\r\nc\r\n');
     assert.equal(appendPatterns('*.log\n', ['*.log', ' *.log ']), '*.log\n');
+    assert.equal(appendPatterns('', ['/name\\ ']), '/name\\ \n', 'an escaped trailing space is kept');
+    assert.equal(appendPatterns('*.log\n!keep.log\n', ['*.log']), '*.log\n!keep.log\n*.log\n', 'a later negation makes it worth adding again');
   });
 });
 
@@ -101,6 +103,26 @@ describe('ignore handlers', () => {
     assert.match(readFileSync(path.join(repo, '.git', 'info', 'exclude'), 'utf8'), /^\*\.secret$/m);
     writeFileSync(path.join(repo, 'x.secret'), 's\n');
     assert.equal(sh(repo, 'check-ignore', 'x.secret'), 'x.secret');
+  });
+
+  test('refuses to rewrite a .gitignore that is not UTF-8', async () => {
+    writeFileSync(path.join(repo, '.gitignore'), Buffer.from([0x63, 0x61, 0x66, 0xe9, 0x0a]));
+    await assert.rejects(call('ignore.add', { patterns: ['*.log'], target: 'gitignore' }), /isn't UTF-8/);
+    assert.deepEqual([...readFileSync(path.join(repo, '.gitignore'))], [0x63, 0x61, 0x66, 0xe9, 0x0a]);
+  });
+
+  test('undo writes through a symlinked info/exclude and keeps the link', async () => {
+    const real = path.join(path.dirname(repo), 'shared-exclude');
+    writeFileSync(real, '# shared\n');
+    rmSync(path.join(repo, '.git', 'info', 'exclude'), { force: true });
+    mkdirSync(path.join(repo, '.git', 'info'), { recursive: true });
+    symlinkSync(real, path.join(repo, '.git', 'info', 'exclude'));
+    const before = await call<Snapshot>('snapshot.capture');
+    const r = await call<{ file: 'exclude'; before: string | null; after: string }>('ignore.add', { patterns: ['*.tmp'], target: 'exclude' });
+    await call('undo.push', { label: 'Ignore', spec: { kind: 'ignore', file: r.file, before: r.before, after: r.after, head: before.head } });
+    await call('undo.run');
+    assert.ok(lstatSync(path.join(repo, '.git', 'info', 'exclude')).isSymbolicLink());
+    assert.equal(readFileSync(real, 'utf8'), '# shared\n');
   });
 
   test('rejects multi-line patterns and paths outside the repository', async () => {

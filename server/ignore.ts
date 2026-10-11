@@ -2,7 +2,7 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import type { HandlerModule } from './ctx.ts';
-import { git } from './git.ts';
+import { git, writeTree } from './git.ts';
 import { insideRepo } from './util.ts';
 
 export type IgnoreTarget = 'gitignore' | 'exclude';
@@ -30,10 +30,20 @@ export function ignoreSuggestions(p: string, isDir: boolean): { pattern: string;
   return out;
 }
 
-/** Append patterns that aren't already present, keeping the file's trailing newline convention. */
+/** Trim a pattern without dropping escaped trailing spaces ("name\\ " ignores "name "). */
+export function trimPattern(p: string): string {
+  return p.replace(/^\s+/, '').replace(/(?<!\\)\s+$/, '');
+}
+
+/**
+ * Append patterns that aren't already in effect, keeping the file's line endings. A pattern counts as
+ * present only if no negation ("!…") comes after it, since that could re-include the files.
+ */
 export function appendPatterns(text: string, patterns: string[]): string {
-  const existing = new Set(text.split(/\r?\n/).map((l) => l.trim()));
-  const add = patterns.map((p) => p.trim()).filter((p) => p && !existing.has(p));
+  const lines = text.split(/\r?\n/).map(trimPattern);
+  const lastNegation = lines.reduce((at, l, i) => (l.startsWith('!') ? i : at), -1);
+  const present = (p: string) => lines.lastIndexOf(p) > lastNegation;
+  const add = [...new Set(patterns.map(trimPattern))].filter((p) => p && !present(p));
   if (!add.length) return text;
   const eol = text.includes('\r\n') ? '\r\n' : '\n';
   const sep = text && !text.endsWith('\n') ? eol : '';
@@ -82,18 +92,33 @@ export const ignoreApi: HandlerModule = () => {
       if (target === 'gitignore' && (await fs.lstat(file).catch(() => null))?.isSymbolicLink()) {
         throw new Error('.gitignore is a symbolic link; edit it directly.');
       }
-      const before = await fs.readFile(file, 'utf8').catch(() => null);
-      if (before && before.length > MAX_IGNORE_FILE) throw new Error('The ignore file is too large to edit here.');
-      const after = appendPatterns(before ?? '', patterns);
-      if (after !== (before ?? '')) {
-        await fs.mkdir(path.dirname(file), { recursive: true });
-        await fs.writeFile(file, after);
+      const raw = await fs.readFile(file).catch(() => null);
+      if (raw && raw.length > MAX_IGNORE_FILE) throw new Error('The ignore file is too large to edit here.');
+      let before: string | null = null;
+      if (raw) {
+        try {
+          before = new TextDecoder('utf-8', { fatal: true }).decode(raw);
+        } catch {
+          throw new Error(`${target === 'gitignore' ? '.gitignore' : 'info/exclude'} isn't UTF-8 text; edit it by hand.`);
+        }
       }
+      const after = appendPatterns(before ?? '', patterns);
+      // Untrack first: if that fails, nothing has changed yet. If writing the file fails, the index is put back.
+      const tree = untrack?.length ? await writeTree(repo) : null;
       if (untrack?.length) {
         untrack.forEach((p) => insideRepo(repo, p));
         await git(repo, ['rm', '--cached', '-r', '-q', '--ignore-unmatch', '--pathspec-from-file=-', '--pathspec-file-nul'], {
           input: untrack.map((p) => `:(literal)${p}`).join('\0') + '\0',
         });
+      }
+      if (after !== (before ?? '')) {
+        try {
+          await fs.mkdir(path.dirname(file), { recursive: true });
+          await fs.writeFile(file, after);
+        } catch (e) {
+          if (tree) await git(repo, ['read-tree', tree]).catch(() => undefined);
+          throw e;
+        }
       }
       return { file: target, before, after };
     },

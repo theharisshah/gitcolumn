@@ -121,7 +121,9 @@ export function FileList({
 
   /** Files in display order, for keyboard and shift-click ranges. */
   const order = useMemo(() => rows.flatMap((r) => (r.kind === 'file' ? [r.item] : [])), [rows]);
-  const selectedFiles = order.filter((f) => selected.includes(keyOf(f)));
+  // Every selected file counts, also those inside collapsed folders.
+  const selectedFiles = files.filter((f) => selected.includes(keyOf(f)));
+  const hasConflicts = files.some((f) => f.conflicted);
   const stagedCount = files.filter((f) => !f.conflicted && f.index !== '.').length;
   const allState = groupState(files);
 
@@ -172,8 +174,13 @@ export function FileList({
         <Checkbox
           state={allState === 'conflict' ? 'none' : allState}
           disabled={!files.length || files.every((f) => f.conflicted)}
-          onClick={() => (allState === 'full' ? onUnstageAll() : onStageAll())}
-          title={allState === 'full' ? 'Unstage all' : 'Stage all'}
+          onClick={() => {
+            // With conflicts, never stage conflicted files (that marks them resolved) or reset the index.
+            if (hasConflicts) onToggleStage(files.filter((f) => !f.conflicted));
+            else if (allState === 'full') onUnstageAll();
+            else onStageAll();
+          }}
+          title={allState === 'full' ? 'Unstage all' : hasConflicts ? 'Stage all resolved files' : 'Stage all'}
         />
         <span className="pane-title">
           {files.length ? plural(files.length, 'changed file') : 'No changes'}
@@ -203,8 +210,15 @@ export function FileList({
         {rows.map((row) => {
           if (row.kind === 'dir') {
             const st = groupState(row.items);
+            const conflicts = row.items.filter((f) => f.conflicted).length;
             return (
-              <div key={`dir:${row.path}`} className="file-row folder-row" style={indent(row.depth)} onClick={() => toggleFolder(row.path)} title={row.path}>
+              <div
+                key={`dir:${row.path}`}
+                className={`file-row folder-row ${conflicts ? 'conflicted' : ''}`}
+                style={indent(row.depth)}
+                onClick={() => toggleFolder(row.path)}
+                title={conflicts ? `${row.path} — ${plural(conflicts, 'conflict')}` : row.path}
+              >
                 <span className="folder-chevron">{row.collapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}</span>
                 <Checkbox
                   state={st === 'conflict' ? 'none' : st}
@@ -217,6 +231,7 @@ export function FileList({
                 />
                 <FileIcon path={row.path} type="tree" open={!row.collapsed} />
                 <span className="file-name">{row.name}</span>
+                {conflicts > 0 && <AlertTriangle size={12} className="folder-conflict" />}
                 <span className="folder-count muted">{row.items.length}</span>
               </div>
             );
@@ -247,9 +262,13 @@ export function FileList({
               <StatusBadge status={primaryStatus(f)} />
               <FileIcon path={f.path} />
               <span className="file-name" title={f.origPath ? `${f.origPath} → ${f.path}` : f.path}>
-                {basename(f.path)}
+                {f.path.endsWith('/') ? `${basename(f.path.slice(0, -1))}/` : basename(f.path)}
                 {mode === 'flat' && <span className="file-dir">{dirname(f.path)}</span>}
-                {f.origPath && <span className="file-dir">← {mode === 'flat' ? f.origPath : basename(f.origPath)}</span>}
+                {f.origPath && (
+                  <span className="file-dir">
+                    ← {mode === 'flat' || dirname(f.origPath) !== dirname(f.path) ? f.origPath : basename(f.origPath)}
+                  </span>
+                )}
               </span>
             </div>
           );

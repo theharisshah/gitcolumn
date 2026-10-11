@@ -21,25 +21,44 @@ export function buildPatch(diff: FileDiff, selection: LineSelection, mode: 'forw
     const sel = selection[hi];
     if (!sel) return;
     const selected = sel === 'all' ? null : new Set(sel);
-    const body: string[] = [];
-    let oldCount = 0;
-    let newCount = 0;
-    let changes = 0;
-
+    type Out = { prefix: ' ' | '+' | '-'; content: string; noNewline: boolean };
+    const emitted: Out[] = [];
     hunk.lines.forEach((line, li) => {
       const isSelected = selected === null || selected.has(li);
       let prefix: ' ' | '+' | '-' | null;
       if (line.type === 'context') prefix = ' ';
       else if (line.type === 'add') prefix = isSelected ? '+' : mode === 'forward' ? null : ' ';
       else prefix = isSelected ? '-' : mode === 'forward' ? ' ' : null;
-      if (prefix === null) return;
-
-      body.push(prefix + line.content);
-      if (line.noNewline) body.push('\\ No newline at end of file');
-      if (prefix !== '+') oldCount++;
-      if (prefix !== '-') newCount++;
-      if (prefix !== ' ') changes++;
+      if (prefix !== null) emitted.push({ prefix, content: line.content, noNewline: !!line.noNewline });
     });
+
+    // "\ No newline at end of file" is only true for the last line of a side. When a partial selection
+    // puts other lines after such a line, that line gains a newline on that side (otherwise git apply
+    // would join it with the next line).
+    const final: Out[] = [];
+    emitted.forEach((l, i) => {
+      if (!l.noNewline) return final.push(l);
+      const rest = emitted.slice(i + 1);
+      const oldAfter = rest.some((r) => r.prefix !== '+');
+      const newAfter = rest.some((r) => r.prefix !== '-');
+      if (l.prefix === '+') final.push({ ...l, noNewline: l.noNewline && !newAfter });
+      else if (l.prefix === '-') final.push({ ...l, noNewline: l.noNewline && !oldAfter });
+      else if (newAfter && !oldAfter) final.push({ ...l, prefix: '-' }, { prefix: '+', content: l.content, noNewline: false });
+      else if (oldAfter && !newAfter) final.push({ prefix: '-', content: l.content, noNewline: false }, { ...l, prefix: '+' });
+      else final.push({ ...l, noNewline: !oldAfter && !newAfter });
+    });
+
+    const body: string[] = [];
+    let oldCount = 0;
+    let newCount = 0;
+    let changes = 0;
+    for (const l of final) {
+      body.push(l.prefix + l.content);
+      if (l.noNewline) body.push('\\ No newline at end of file');
+      if (l.prefix !== '+') oldCount++;
+      if (l.prefix !== '-') newCount++;
+      if (l.prefix !== ' ') changes++;
+    }
 
     if (changes === 0) return;
 

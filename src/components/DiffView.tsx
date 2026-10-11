@@ -44,7 +44,8 @@ export const DiffView = memo(function DiffView({ diff, mode = 'readonly', onAppl
   const path = diff.newPath || diff.oldPath;
   const lang = useMemo(() => (getSetting('syntaxHighlighting') ? languageFor(path) : null), [path]);
   const isLfs = useMemo(() => diff.hunks.some((h) => h.lines.some((l) => l.content === LFS_POINTER)), [diff]);
-  const canPartial = mode !== 'readonly' && !!onApply && !diff.isBinary && !diff.isNew && !diff.isDeleted && !diff.isRename;
+  // A truncated diff lacks the end of its last chunk; staging from it would apply only part of the change.
+  const canPartial = mode !== 'readonly' && !!onApply && !diff.isBinary && !diff.isNew && !diff.isDeleted && !diff.isRename && !diff.truncated;
 
   if (diff.isBinary) {
     if (images && isImagePath(path)) return <ImageDiff before={diff.isNew ? undefined : images.before} after={diff.isDeleted ? undefined : images.after} />;
@@ -111,7 +112,9 @@ export const DiffView = memo(function DiffView({ diff, mode = 'readonly', onAppl
           }}
         />
       ))}
-      {diff.truncated && <div className="diff-note">Diff truncated — too many lines to display.</div>}
+      {diff.truncated && (
+        <div className="diff-note">Diff truncated — too many lines to display.{mode !== 'readonly' ? ' Stage or discard the whole file instead.' : ''}</div>
+      )}
     </div>
   );
 });
@@ -166,6 +169,7 @@ const HunkView = memo(function HunkView({
         <span className="hunk-actions">{actions}</span>
       </div>
       <div className="hunk-lines">
+      <div className="hunk-lines-inner">
       {hunk.lines.map((line, li) => {
         const isChange = line.type !== 'context';
         const isSelected = !!selected?.has(li);
@@ -192,6 +196,7 @@ const HunkView = memo(function HunkView({
           </div>
         );
       })}
+      </div>
       </div>
     </div>
   );
