@@ -34,6 +34,3 @@ jobs:
 
       - name: Test
         run: npm test
-        # The tests drive real git repositories; until they have been seen passing on Windows,
-        # failures there are reported without failing the run.
-        continue-on-error: ${{ runner.os == 'Windows' }}

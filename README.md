@@ -48,8 +48,7 @@ npm run icons        # regenerate build/icon.{png,icns,ico} + build/icons/ from 
    there is none yet, or replacing the files of an existing (draft or published) release.
 3. Review the draft's notes and publish it.
 
-`.github/workflows/ci.yml` runs the typecheck and tests on macOS, Linux and Windows for every push
-(on Windows, test failures are reported but don't fail the run yet).
+`.github/workflows/ci.yml` runs the typecheck and tests on macOS, Linux and Windows for every push.
 
 **macOS signing and notarization.** Without a certificate, macOS builds are ad-hoc signed so they
 run on Apple Silicon, and users have to right-click → Open the first time. To ship signed,
