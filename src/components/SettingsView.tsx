@@ -7,6 +7,7 @@ import { useSetting } from '../lib/settings';
 import { useActions } from '../repo/actions';
 import { useRepo } from '../repo/RepoContext';
 import { useUI } from '../ui/UIProvider';
+import { CONTEXT_OPTIONS } from './DiffToolbar';
 
 function Section({ title, icon, children, description }: { title: string; icon?: ReactNode; description?: ReactNode; children: ReactNode }) {
   return (
@@ -144,6 +145,9 @@ function BehaviorSection() {
   const [monthHeaders, setMonthHeaders] = useSetting('historyMonthHeaders');
   const [avatars, setAvatars] = useSetting('githubAvatars');
   const [staleDays, setStaleDays] = useSetting('staleBranchDays');
+  const [diffContext, setDiffContext] = useSetting('diffContext');
+  const [diffWrap, setDiffWrap] = useSetting('diffWrap');
+  const [ignoreWs, setIgnoreWs] = useSetting('diffIgnoreWhitespace');
   return (
     <Section title="Behavior" description="These preferences apply to all repositories.">
       <div className="settings-grid">
@@ -182,7 +186,25 @@ function BehaviorSection() {
             <option value={365}>1 year</option>
           </select>
         </label>
+        <label className="field">
+          <span className="field-label">Working Copy diff context</span>
+          <select className="input" value={diffContext} onChange={(e) => setDiffContext(Number(e.target.value))}>
+            {(CONTEXT_OPTIONS.some((o) => o.value === diffContext) ? CONTEXT_OPTIONS : [...CONTEXT_OPTIONS, { value: diffContext, label: `${diffContext} lines` }]).map((o) => (
+              <option key={o.value} value={o.value}>
+                {o.label}
+              </option>
+            ))}
+          </select>
+        </label>
       </div>
+      <label className="toggle settings-row">
+        <input type="checkbox" checked={diffWrap} onChange={(e) => setDiffWrap(e.target.checked)} />
+        Wrap long lines in Working Copy diffs
+      </label>
+      <label className="toggle settings-row">
+        <input type="checkbox" checked={ignoreWs} onChange={(e) => setIgnoreWs(e.target.checked)} />
+        Ignore whitespace changes in Working Copy diffs
+      </label>
       <label className="toggle settings-row">
         <input type="checkbox" checked={syntax} onChange={(e) => setSyntax(e.target.checked)} />
         Syntax highlighting in diffs and blame

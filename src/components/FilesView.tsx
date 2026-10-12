@@ -84,7 +84,10 @@ export function FilesBrowser({ rev, initialPath, compact }: { rev: string | null
       items.push({ label: 'Blame', onClick: () => actions.blame(entry.path, rev) });
       items.push({ label: 'Show File History', onClick: () => actions.showFileHistory(entry.path, rev) });
     }
-    if (entry.type === 'tree') items.push({ label: 'Export This Folder…', onClick: () => actions.exportFiles(rev ?? 'HEAD', rev ?? 'HEAD', entry.path) });
+    items.push({
+      label: entry.type === 'tree' ? 'Export This Folder…' : 'Export This File…',
+      onClick: () => actions.exportFiles(rev ?? 'HEAD', rev ?? 'HEAD', entry.path),
+    });
     if (rev === null) {
       items.push('separator');
       items.push({ label: 'Ignore…', onClick: () => actions.ignore(entry.path) });
@@ -96,6 +99,14 @@ export function FilesBrowser({ rev, initialPath, compact }: { rev: string | null
   };
 
   const showFile = selected && selected.type !== 'tree';
+  // Jump to a parent folder: select it and open the tree down to it.
+  const goTo = (dir: string | null) => {
+    setFilter('');
+    if (!dir) return setSelected(null);
+    setSelected({ name: dir.slice(dir.lastIndexOf('/') + 1), path: dir, type: 'tree' });
+    setRevealPath(`${dir}/`);
+  };
+  const segments = selected ? selected.path.split('/') : [];
   return (
     <div className={`files-browser ${compact ? 'compact' : ''}`}>
       <div className="files-tree-pane" style={compact ? { height: size } : { width: size }}>
@@ -149,6 +160,27 @@ export function FilesBrowser({ rev, initialPath, compact }: { rev: string | null
       </div>
       <Splitter value={size} onChange={setSize} min={compact ? 100 : 180} max={compact ? 600 : 700} vertical={compact} />
       <div className="files-content-pane">
+        <div className="files-breadcrumb">
+          <button className="link-button" onClick={() => goTo(null)} title="Repository root">
+            {repo.name}
+          </button>
+          {segments.map((seg, i) => {
+            const last = i === segments.length - 1;
+            const dir = segments.slice(0, i + 1).join('/');
+            return (
+              <span key={dir} className="files-crumb">
+                <span className="muted">/</span>
+                {last && selected?.type !== 'tree' ? (
+                  <span className="files-crumb-current">{seg}</span>
+                ) : (
+                  <button className="link-button" onClick={() => goTo(dir)}>
+                    {seg}
+                  </button>
+                )}
+              </span>
+            );
+          })}
+        </div>
         {showFile ? (
           <FileContent key={selected.path} rev={rev} path={selected.path} />
         ) : (

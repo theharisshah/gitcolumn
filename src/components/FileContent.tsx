@@ -1,10 +1,11 @@
-import { Copy, ExternalLink, FolderOpen, GitCommitHorizontal, History as HistoryIcon, Package, ScanText } from 'lucide-react';
+import { Copy, Download, ExternalLink, FolderOpen, GitCommitHorizontal, History as HistoryIcon, Package, ScanText } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import type { FileContentResult } from '../../shared/types';
 import { useApp } from '../AppContext';
 import { api } from '../lib/api';
 import { FileIcon } from '../lib/fileIcons';
 import { copyText, shortHash } from '../lib/format';
+import { useActions } from '../repo/actions';
 import { useRepo } from '../repo/RepoContext';
 import { useUI } from '../ui/UIProvider';
 import { CodeLines } from './CodeLines';
@@ -21,6 +22,7 @@ export function FileContent({ rev, path }: { rev: string | null; path: string })
   const { repo, version, setView } = useRepo();
   const ui = useUI();
   const app = useApp();
+  const actions = useActions();
   const [content, setContent] = useState<FileContentResult | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -114,6 +116,10 @@ export function FileContent({ rev, path }: { rev: string | null; path: string })
             </button>
             <button className="icon-button" title="File history" onClick={() => setView({ kind: 'file', path, mode: 'history', rev })}>
               <HistoryIcon size={14} />
+            </button>
+            {/* The committed version (HEAD for the working copy), like the folder export. */}
+            <button className="icon-button" title={rev === null ? 'Export the committed version as a zip' : 'Export as a zip'} onClick={() => actions.exportFiles(rev ?? 'HEAD', rev ?? 'HEAD', path)}>
+              <Download size={14} />
             </button>
           </>
         )}
