@@ -492,7 +492,8 @@ describe('persistent undo', () => {
     assert.ok(!existsSync(path.join(repo, '.git', 'hooks', 'pre-commit')));
   });
 
-  test('paths starting with a double quote are hashed literally', async () => {
+  // Windows doesn't allow " in file names.
+  test('paths starting with a double quote are hashed literally', { skip: process.platform === 'win32' }, async () => {
     write('a.txt', 'other file\n');
     sh(repo, 'add', 'a.txt');
     sh(repo, 'commit', '-q', '-m', 'a');
@@ -506,7 +507,8 @@ describe('persistent undo', () => {
     assert.equal(read('"a.txt"'), 'new work\n');
   });
 
-  test('a failed write leaves the file intact and the entry ready for a retry', async () => {
+  // Relies on a read-only folder refusing writes (chmod), which Windows doesn't do.
+  test('a failed write leaves the file intact and the entry ready for a retry', { skip: process.platform === 'win32' }, async () => {
     mkdirSync(path.join(repo, 'ro'));
     write('ro/f.txt', 'discarded\n');
     const before = await snapshot(['ro/f.txt']);
@@ -660,7 +662,8 @@ describe('persistent undo', () => {
     }
   });
 
-  test('files with very long names are restored (short temp names)', async () => {
+  // Beyond Windows' path length limit for git without core.longpaths.
+  test('files with very long names are restored (short temp names)', { skip: process.platform === 'win32' }, async () => {
     const long = `${'n'.repeat(240)}.txt`;
     write(long, 'precious\n');
     const before = await snapshot([long]);

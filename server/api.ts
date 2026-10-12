@@ -775,10 +775,15 @@ export function createApi(host: Host): Record<string, Handler> {
 
     async 'stash.diff'({ repo, ref }: { repo: string; ref: string }): Promise<FileDiff[]> {
       assertStash(ref);
-      const raw = await git(repo, ['stash', 'show', '-p', '-M', '--include-untracked', ...DIFF_FLAGS, ref], {
-        maxBytes: MAX_DIFF_BYTES,
-      });
-      return parseDiff(raw);
+      // Built from the stash's commits rather than `git stash show --include-untracked`, whose
+      // untracked-files path (an index merge) gives different output across platforms.
+      const tracked = await git(repo, ['diff', '-M', ...DIFF_FLAGS, `${ref}^1`, ref, '--'], { maxBytes: MAX_DIFF_BYTES });
+      // The untracked files are a parentless third commit: all additions.
+      const hasUntracked = await git(repo, ['rev-parse', '--verify', '-q', `${ref}^3`]).then((s) => !!s.trim(), () => false);
+      const untracked = hasUntracked
+        ? await git(repo, ['diff-tree', '-p', '-r', '--root', '--no-commit-id', ...DIFF_FLAGS, `${ref}^3`, '--'], { maxBytes: MAX_DIFF_BYTES })
+        : '';
+      return parseDiff(tracked + (tracked && untracked && !tracked.endsWith('\n') ? '\n' : '') + untracked);
     },
 
     // ----------------------------------------------------------------- tags

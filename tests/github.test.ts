@@ -64,7 +64,8 @@ describe('gh parsing', () => {
   });
 });
 
-describe('gh handlers (fake gh)', () => {
+// The fake gh is a shebang script, which Windows can't run directly.
+describe('gh handlers (fake gh)', { skip: process.platform === 'win32' ? 'needs a shebang script' : false }, () => {
   let repo: string;
   let log: string;
   let call: <T = unknown>(method: string, args?: object) => Promise<T>;

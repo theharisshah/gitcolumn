@@ -279,7 +279,8 @@ describe('branches', () => {
 
   test('worktree folders are relative to the repository; a file named like a branch does not confuse diffs', async () => {
     const r = await call<{ path: string }>('worktree.add', { path: '../relative-wt', newBranch: 'wt-branch', start: 'main' });
-    assert.equal(r.path, path.join(fs.realpathSync(root), 'relative-wt'));
+    // .native: on Windows the temp folder may be an 8.3 short name (RUNNER~1).
+    assert.equal(r.path, path.join(fs.realpathSync.native(root), 'relative-wt'));
     await call('worktree.remove', { path: r.path });
 
     commitFile('feature', 'a file named like a branch\n', 'file');
