@@ -40,26 +40,70 @@ npm run dist:linux   # release/*.AppImage + *.deb for x64 and arm64
 npm run icons        # regenerate build/icon.{png,icns,ico} + build/icons/ from build/icon.svg
 ```
 
-Pushing a tag like `v1.0.0` runs `.github/workflows/release.yml`, which builds all three
-platforms and attaches the installers to a draft GitHub Release.
+## Releasing
 
-**Signing.** Without a certificate, macOS builds are ad-hoc signed so they run on Apple Silicon.
-To sign with a Developer ID and notarize, set `CSC_LINK` (base64 .p12 or path), `CSC_KEY_PASSWORD`,
-`APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD` and `APPLE_TEAM_ID` — locally or as repository secrets
-(`MAC_CERTIFICATE_P12_BASE64`, `MAC_CERTIFICATE_PASSWORD`, …) for CI. `scripts/dist.mjs` switches
-to full signing with the hardened runtime automatically when a certificate is present.
+1. Bump `version` in `package.json`, commit, and tag it: `git tag v1.1.0 && git push origin v1.1.0`.
+2. `.github/workflows/release.yml` builds macOS, Windows and Linux installers, adds a
+   `SHA256SUMS.txt`, and attaches everything to the tag's GitHub Release — creating a **draft** if
+   there is none yet, or replacing the files of an existing (draft or published) release.
+3. Review the draft's notes and publish it.
+
+`.github/workflows/ci.yml` runs the typecheck and tests on macOS, Linux and Windows for every push
+(on Windows, test failures are reported but don't fail the run yet).
+
+**macOS signing and notarization.** Without a certificate, macOS builds are ad-hoc signed so they
+run on Apple Silicon, and users have to right-click → Open the first time. To ship signed,
+notarized builds you need an Apple Developer account:
+
+| Repository secret | What it is |
+| --- | --- |
+| `MAC_CERTIFICATE_P12_BASE64` | "Developer ID Application" certificate + key exported from Keychain as .p12, then `base64 -i cert.p12` |
+| `MAC_CERTIFICATE_PASSWORD` | The password chosen when exporting the .p12 |
+| `APPLE_ID` | The Apple ID email of the developer account |
+| `APPLE_APP_SPECIFIC_PASSWORD` | An app-specific password from appleid.apple.com |
+| `APPLE_TEAM_ID` | The 10-character team ID |
+
+Locally, set `CSC_LINK` (path or base64 of the .p12), `CSC_KEY_PASSWORD` and the three `APPLE_*`
+variables. `scripts/dist.mjs` switches to full signing with the hardened runtime and notarization
+automatically when a certificate is present.
+
+**Windows signing.** Set `WIN_CSC_LINK` (base64 or path of a code-signing .pfx) and
+`WIN_CSC_KEY_PASSWORD` as secrets (or locally). `CSC_LINK` (the macOS certificate) is never used for
+Windows. Without them, installers are unsigned and
+SmartScreen warns on first run. Cloud signing (e.g. Azure Trusted Signing) works too through
+electron-builder's `win.azureSignOptions`.
+
+**Runtime dependencies.** GitColumn uses the `git` on the user's PATH. Git LFS files need
+[`git-lfs`](https://git-lfs.com) (`brew install git-lfs` / `winget install GitHub.GitLFS` /
+`apt install git-lfs`, then `git lfs install`). Pull requests need the
+[GitHub CLI](https://cli.github.com) signed in with `gh auth login`.
 
 ## Features
 
-- **Working Copy** — tri-state staging checkboxes, multi-select, stage/unstage/discard whole files,
-  **hunks or individual lines** (click or drag in the diff gutter), syntax-highlighted diffs with
-  word-level changes, side-by-side / onion-skin **image diffs**, Git LFS pointer detection.
-- **Commit composer** — subject/body with length hint, amend, ⌘↩ to commit, offers to stage
-  everything when nothing is staged, prompts for your identity if git doesn't know it.
-- **History** — virtualized commit list with a lane graph, branch/remote/tag badges, current branch
-  or all branches, search by message, author or code (`-S`), stacked per-file diffs.
+- **Working Copy** — sortable file table (flat or folder tree) with tri-state staging checkboxes,
+  stage/unstage/discard whole files, **chunks or individual lines** (click or drag in the diff
+  gutter, also with zero context lines), Staged/Unstaged toggle, context lines, wrap and whitespace
+  options, syntax-highlighted diffs with word-level changes, side-by-side / onion-skin **image
+  diffs**, Git LFS pointer detection, **Ignore…** (file, extension or folder; .gitignore or
+  info/exclude).
+- **Commit composer** — author with avatar, subject/body with length hint, sign-off, your
+  `commit.template`, amend, Unstage All, ⌘↩ to commit.
+- **History** — virtualized commit list with a lane graph (up to 48 lanes, scrollable sideways,
+  resizable), month sections, compact two-line rows with avatars when narrow, branch/remote/tag
+  badges, current branch or all branches, search by message, author or code (`-S`).
+- **Commit details** — Changeset with expandable per-file diffs, or the commit's full file Tree.
+- **Files** — browse the working copy or any branch, tag or commit with a fuzzy filter, preview,
+  blame and history per file, export a revision (or a folder or file) as a zip.
 - **Rewrite history** — interactive rebase editor (pick, reword, edit, squash, fixup, drop,
-  drag to reorder) plus one-click *Edit Message*, *Squash/Fixup into Parent* and *Drop Commit*.
+  drag to reorder) plus one-click *Edit Message*, *Squash/Fixup into Parent* and *Drop Commit* —
+  also **across merge commits**, which are recreated (`--rebase-merges`) rather than flattened.
+- **Branches Review** — every branch against a base: ahead/behind, merged, stale, gone upstream;
+  bulk-delete merged branches. **Pinned** and **archived** branches, **stacked branches** with
+  Restack, **worktrees**, and a **Compare** view (commits and files, two or three dots).
+- **Pull Requests** — list, read (conversation, checks, files, commits), check out, create and merge
+  GitHub pull requests through your own `gh` login.
+- **Quick Actions** (⌘K / ⌘⇧A) — fuzzy search over commands, branches, files and commits.
+- **Reflog** — every position HEAD (or a branch) has been at, to recover lost work.
 - **File history & blame** — every commit that touched a file (following renames) with its diff;
   blame with syntax highlighting, age colouring and *Blame Previous Revision*.
 - **Undo (⌘Z)** — staging, discards (including untracked files), commits, amends, checkouts,
@@ -81,7 +125,9 @@ to full signing with the hardened runtime automatically when a certificate is pr
 
 | Shortcut | Action |
 | --- | --- |
-| ⌘1 / ⌘2 / ⌘3 | Working Copy / History / Stashes |
+| ⌘1 … ⌘7 | Working Copy, History, Stashes, Files, Pull Requests, Reflog, Branches Review |
+| ⌘K / ⌘⇧A | Quick Actions |
+| ⌘[ / ⌘] | Back / Forward (also the mouse's side buttons) |
 | ⌘, | Settings |
 | ⌘Z | Undo the last git operation (outside text fields) |
 | ⌘R | Refresh |
@@ -96,10 +142,18 @@ to full signing with the hardened runtime automatically when a certificate is pr
 
 ```
 shared/types.ts      types used by both sides
+shared/rebase.ts     which merges a rebase plan recreates (used by both sides)
 server/git.ts        spawns git (no terminal prompts, timeouts, output caps, per-call env)
 server/parse.ts      parsers: status v2, refs, log, diffs, blame, submodules, LFS…
 server/patch.ts      builds partial patches for hunk / line staging
-server/api.ts        every operation as a named handler (incl. rebase plans and undo snapshots)
+server/api.ts        core operations as named handlers, combined with the modules below
+server/undo.ts       the persistent undo journal and its executors
+server/files.ts      file trees, contents and zip export at any revision
+server/branches.ts   branches review, flags, stacks, worktrees, comparisons
+server/rebase.ts     interactive rebase across merges
+server/github.ts     pull requests through the GitHub CLI
+server/reflog.ts     the reflog
+server/ignore.ts     Ignore… (.gitignore / info/exclude)
 server/http.ts       exposes the handlers over HTTP for browser mode (dev only)
 electron/            main process (IPC, menu, askpass bridge, trash) and preload bridge
 src/                 React renderer: repo context + undo stack, actions, views, dialogs
@@ -119,7 +173,13 @@ compare-and-swap transaction (`git update-ref --stdin`).
 ## Known limitations
 
 - Git LFS management needs `git-lfs` installed; without it LFS files show as pointer files.
-- Interactive rebase refuses ranges containing merge commits (it would flatten them).
-- Pushes and other remote changes can't be undone.
-- Windows and Linux installers build cleanly (locally on macOS and in CI) but have only been
-  exercised on macOS so far.
+- Across merge commits, interactive rebase can't reorder commits, change the merges themselves, or
+  squash/fixup a commit that starts a branch or directly follows a merge, and it refuses merges that
+  contain changes of their own ("evil merges").
+- Undoing a hard reset moves the branch back but can't bring back the uncommitted changes it
+  discarded.
+- Pull requests are GitHub-only (github.com, or a GitHub Enterprise host `gh` is signed in to) and need
+  the GitHub CLI (`gh`) signed in to an account with access to the repository.
+- Pushes and other remote changes (including merging a pull request) can't be undone.
+- Windows and Linux installers build cleanly (cross-built on macOS) but have only been exercised on
+  macOS so far.
